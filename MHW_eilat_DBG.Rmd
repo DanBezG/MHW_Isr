@@ -1,0 +1,41 @@
+---
+title: "MHW_eilat_DBG"
+author: "Dan Bez Golanski"
+date: "2023-11-01"
+output: html_document
+---
+#load packages
+```{r}
+library(suntools)
+```
+
+#load data
+```{r}
+fish_df <-  readRDS("C:/Users/JonathanB22/Desktop/Dan/Renanel Data/Dan data subset.rds")
+```
+
+#correct time and add sunset.rise
+```{r}
+#random coordiantes in eilat
+fish_df$sunrise <-sunriset(matrix(c(29.538417,34.954417),nrow=1), as.POSIXct(as.Date(fish_df$datetime_GMT3),tz="IST"),direction = "sunrise", POSIXct.out = T)$time
+fish_df$sunset <-sunriset(matrix(c(29.538417,34.954417),nrow=1), as.POSIXct(as.Date(fish_df$datetime_GMT3),tz="IST"),direction = "sunset", POSIXct.out = T)$time
+for (row_num in 112143:dim(fish_df)[1]) {
+   if (fish_df$real_datetime[row_num] > fish_df$sunrise[row_num] && fish_df$real_datetime[row_num] < fish_df$sunset[row_num]) 
+    {
+      fish_df$Day_night[row_num]<-"Day"
+    }
+  else
+    {
+      fish_df$Day_night[row_num]<-"Night"
+    }
+}
+
+```
+
+#save data
+```{r}
+write.csv(fish_df,"C:/Users/JonathanB22/Desktop/Dan/Renanel Data/MHW_Eilat_sun.csv")
+```
+
+
+

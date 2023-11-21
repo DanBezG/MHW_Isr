@@ -11,7 +11,7 @@ library(suntools)
 
 #load data
 ```{r}
-fish_df <-  readRDS("C:/Users/JonathanB22/Desktop/Dan/Renanel Data/Dan data subset.rds")
+fish_df <-  readRDS("Renanel_raw.rds")
 ```
 
 #correct time and add sunset.rise
@@ -34,7 +34,7 @@ for (row_num in 112143:dim(fish_df)[1]) {
 
 #save data
 ```{r}
-write.csv(fish_df,"C:/Users/JonathanB22/Desktop/Dan/Renanel Data/MHW_Eilat_sun.csv")
+write.csv(fish_df,"Valuble_fish.csv")
 ```
 
 

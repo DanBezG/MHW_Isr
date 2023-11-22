@@ -18,6 +18,30 @@ fish_df <-  readRDS("Renanel_raw.rds")
 filter_fish <- read.csv("Valuble_fish.csv")
 ```
 
+#filter valuble_fish and compute sampling time frequncies
+```{r}
+valuble_fish <- c(1255787,1255788,1255789,1255791,1255800,1255801,1255803,1255805,1255806,1255807,1255810,1255811,1255812,1255814,1255815)
+fish_df <- fish_df %>% filter(fish_id %in% valuble_fish)
+fish_df <- fish_df %>% arrange(fish_id,real_datetime)
+fish_df$diff_samp_time <- NA
+for (row_num in 2:dim(fish_df)[1]) {
+    if (fish_df$fish_id[row_num]==fish_df$fish_id[row_num-1]) {
+      if (fish_df$date[row_num]==fish_df$date[row_num-1]) {
+        fish_df$diff_samp_time[row_num] <-     difftime(fish_df$real_datetime[row_num],fish_df$real_datetime[row_num-1],units = "secs")
+      }  
+      else {
+        fish_df$diff_samp_time[row_num] <- NA
+      }
+    }
+  else {
+    fish_df$diff_samp_time[row_num] <- NA
+  }
+}
+fish_samp_freq_df <- fish_df %>% group_by(fish_id,date) %>% 
+  summarise(mean_freq = mean(diff_samp_time,na.rm = T), n = n())
+
+```
+
 #Add sunset.rise and Before.After
 ```{r}
 filter_fish$real_datetime <- parse_date_time(filter_fish$real_datetime, orders = "ymd HMS")

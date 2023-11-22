@@ -24,7 +24,7 @@ valuble_fish <- c(1255787,1255788,1255789,1255791,1255800,1255801,1255803,125580
 fish_df <- fish_df %>% filter(fish_id %in% valuble_fish)
 fish_df <- fish_df %>% arrange(fish_id,real_datetime)
 fish_df$date <- cut(fish_df$real_datetime,breaks = "day")
-fish_df$diff_samp_time_sec <- NA
+fish_df$diff_samp_time_sec  <- NA
 for (row_num in 2:dim(fish_df)[1]) {
     if (fish_df$fish_id[row_num]==fish_df$fish_id[row_num-1]) {
       if (fish_df$date[row_num]==fish_df$date[row_num-1]) {

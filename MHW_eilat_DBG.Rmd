@@ -15,7 +15,7 @@ library(dplyr)
 #load data
 ```{r}
 fish_df <-  readRDS("Renanel_raw.rds")
-filter_fish <- readRDS("Valuble_fish.RDS")
+filter_fish <-  readRDS("Valuble_fish.RDS")
 ```
 
 #filter valuble_fish and compute sampling time frequncies

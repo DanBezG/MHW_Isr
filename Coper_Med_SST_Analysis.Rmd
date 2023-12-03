@@ -1,0 +1,35 @@
+---
+title: "Copernicus_Med_MHW"
+author: "Dan Bez Golanski"
+date: "`r Sys.Date()`"
+output: html_document
+---
+#load packages
+```{r warning=FALSE}
+library(ncdf4)
+library(lubridate)
+```
+
+#load data
+```{r}
+coperniucs_nc <- nc_open("cmems_SST_MED_SST_L4_REP_OBSERVATIONS_010_021_1701005428241.nc")
+dim_lon <- ncvar_get(coperniucs_nc,"lon")
+dim_lat <- ncvar_get(coperniucs_nc,"lat")
+dim_time <- ncvar_get(coperniucs_nc,"time")
+t_units <- ncatt_get(coperniucs_nc,"time","units") 
+t_ustr <- strsplit(t_units$value, " ")
+t_dstr <- strsplit(unlist(t_ustr)[3], "-")
+```
+
+#create matrix
+```{r}
+coords <- as.matrix(expand.grid(dim_lon,dim_lat,dim_time))
+sst <- ncvar_get(coperniucs_nc,"analysed_sst",collapse_degen = F)
+analysis_error <- ncvar_get(coperniucs_nc,"analysis_error",collapse_degen = F)
+nc_df <- data.frame(cbind(coords,sst,analysis_error))
+nc_df <- na.omit(nc_df)
+names(nc_df) <- c("lon", "lat","date", "sst", "error")
+nc_df$date <- ymd(t_dstr)+ dseconds(dim_time)
+write.csv(nc_df,"Coper_SST_Med.csv")
+saveRDS(nc_df,"Coper_SST_Med.RDS")
+```

@@ -8,9 +8,15 @@ output: html_document
 ```{r warning=FALSE}
 library(ncdf4)
 library(lubridate)
+library(tidyverse)
+library(heatwaveR)
+```
+#load data
+```{r}
+sst_long <- readRDS("Coper_SST_Med.RDS")
 ```
 
-#load data
+#load ncdf
 ```{r}
 coperniucs_nc <- nc_open("cmems_SST_MED_SST_L4_REP_OBSERVATIONS_010_021_1701005428241.nc")
 dim_lon <- ncvar_get(coperniucs_nc,"lon")
@@ -21,15 +27,42 @@ t_ustr <- strsplit(t_units$value, " ")
 t_dstr <- strsplit(unlist(t_ustr)[3], "-")
 ```
 
-#create matrix
+#create dataframe
 ```{r}
-coords <- as.matrix(expand.grid(dim_lon,dim_lat,dim_time))
 sst <- ncvar_get(coperniucs_nc,"analysed_sst",collapse_degen = F)
 analysis_error <- ncvar_get(coperniucs_nc,"analysis_error",collapse_degen = F)
-nc_df <- data.frame(cbind(coords,sst,analysis_error))
-nc_df <- na.omit(nc_df)
-names(nc_df) <- c("lon", "lat","date", "sst", "error")
-nc_df$date <- ymd(t_dstr)+ dseconds(dim_time)
-write.csv(nc_df,"Coper_SST_Med.csv")
-saveRDS(nc_df,"Coper_SST_Med.RDS")
+sst_wide <- as.matrix(expand.grid(dim_lon,dim_lat))
+sst_wide <- as.data.frame(sst_wide)
+names(sst_wide) <- c("lon","lat")
+sst_wide <- sst_wide %>% arrange(lon)
+for (year_i in 1:length(dim_time)) {
+temp_date <-sst[,,year_i] 
+temp_date <- t(temp_date)
+vec_temp_date <- c(temp_date)
+sst_wide[,year_i+2] <- vec_temp_date
+}
+names(sst_wide) <- c("lon","lat",dim_time)
+sst_long <- cbind(sst_wide[1:2], stack(sst_wide[3:dim(sst_wide)[2]]))
+names(sst_long) <- c("lon","lat","sst","date")
+sst_long <- na.omit(sst_long)
+sst_long$date <- as.numeric(as.character(sst_long$date))
+sst_long$date <- ymd(t_dstr)+ dseconds(sst_long$date)
+sst_long$sst <- sst_long$sst - 273.15
+
+saveRDS(sst_long,"Coper_SST_Med.RDS")
 ```
+
+calculate climatelogy and MHW's events
+```{r} 
+temp_point <- sst_long %>% filter(lat==sst_long$lat[1] & lon==sst_long$lon[1])
+#deleting lat and lon cause all in same position
+temp_point <- temp_point[-1:-2]
+temp_point <- temp_point %>% arrange(date)
+names(temp_point) <- c("temp","t")
+clim_period <- c(temp_point$t[1],temp_point$t[15398])
+climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period)
+events <- detect_event(climatelogy_tresh)
+event_line(events,start_date = "2021-12-01", end_date = "2023-06-30",spread=300)
+write.csv(events$event,"MHW_Events_ISR.csv")
+```
+

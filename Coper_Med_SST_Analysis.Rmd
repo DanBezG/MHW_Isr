@@ -59,10 +59,10 @@ temp_point <- sst_long %>% filter(lat==sst_long$lat[1] & lon==sst_long$lon[1])
 temp_point <- temp_point[-1:-2]
 temp_point <- temp_point %>% arrange(date)
 names(temp_point) <- c("temp","t")
-clim_period <- c(temp_point$t[1],temp_point$t[15398])
+clim_period <- c(temp_point$t[1],"2011-08-25")
 climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period)
 events <- detect_event(climatelogy_tresh)
-event_line(events,start_date = "2021-12-01", end_date = "2023-06-30",spread=300)
+event_line(events,start_date = "2021-12-01", end_date = "2023-06-30",spread=500)
 write.csv(events$event,"MHW_Events_ISR.csv")
 ```
 

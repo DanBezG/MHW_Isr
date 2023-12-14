@@ -4,19 +4,19 @@ author: "Dan Bez Golanski"
 date: "`r Sys.Date()`"
 output: html_document
 ---
-#load packages
+## Load packages
 ```{r warning=FALSE}
 library(ncdf4)
 library(lubridate)
 library(tidyverse)
 library(heatwaveR)
 ```
-#load data
+##Load data
 ```{r}
 sst_long <- readRDS("Coper_SST_Med.RDS")
 ```
 
-#load ncdf
+##Load ncdf
 ```{r}
 coperniucs_nc <- nc_open("cmems_SST_MED_SST_L4_REP_OBSERVATIONS_010_021_1701005428241.nc")
 dim_lon <- ncvar_get(coperniucs_nc,"lon")
@@ -27,7 +27,7 @@ t_ustr <- strsplit(t_units$value, " ")
 t_dstr <- strsplit(unlist(t_ustr)[3], "-")
 ```
 
-#create dataframe
+##Create dataframe
 ```{r}
 sst <- ncvar_get(coperniucs_nc,"analysed_sst",collapse_degen = F)
 analysis_error <- ncvar_get(coperniucs_nc,"analysis_error",collapse_degen = F)
@@ -52,7 +52,7 @@ sst_long$sst <- sst_long$sst - 273.15
 saveRDS(sst_long,"Coper_SST_Med.RDS")
 ```
 
-calculate climatelogy and MHW's events
+##Calculate climatelogy and MHW's events
 ```{r} 
 temp_point <- sst_long %>% filter(lat==sst_long$lat[1] & lon==sst_long$lon[1])
 #deleting lat and lon cause all in same position
@@ -60,9 +60,13 @@ temp_point <- temp_point[-1:-2]
 temp_point <- temp_point %>% arrange(date)
 names(temp_point) <- c("temp","t")
 clim_period <- c(temp_point$t[1],"2011-08-25")
-climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period)
-events <- detect_event(climatelogy_tresh)
-event_line(events,start_date = "2021-12-01", end_date = "2023-06-30",spread=500)
-write.csv(events$event,"MHW_Events_ISR.csv")
+MHW_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 90)
+MCS_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 10)
+MHW_events <- detect_event(climatelogy_tresh)
+MCS_events <- detect_event(climatelogy_tresh,coldSpells = T)
+event_line(MHW_events,start_date = "2021-12-01", end_date = "2023-06-30",spread=500)
+write.csv(MHW_events$event,"MHW_Events_ISR.csv")
+write.csv(MCS_events$event,"MCS_Events_ISR.csv")
+
 ```
 

@@ -54,18 +54,50 @@ saveRDS(sst_long,"Coper_SST_Med.RDS")
 
 ##Calculate climatelogy and MHW's events
 ```{r} 
-temp_point <- sst_long %>% filter(lat==sst_long$lat[1] & lon==sst_long$lon[1])
-#deleting lat and lon cause all in same position
-temp_point <- temp_point[-1:-2]
-temp_point <- temp_point %>% arrange(date)
-names(temp_point) <- c("temp","t")
-clim_period <- c(temp_point$t[1],"2011-08-25")
-MHW_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 90)
-MCS_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 10)
-MHW_events <- detect_event(climatelogy_tresh)
-MCS_events <- detect_event(climatelogy_tresh,coldSpells = T)
-event_line(MHW_events,start_date = "2021-12-01", end_date = "2023-06-30",spread=500)
-write.csv(MHW_events$event,"MHW_Events_ISR.csv")
+coordinates_list <- sst_long %>% filter(date==sst_long$date[1])
+coordinates_list <- coordinates_list %>% select(lat,lon)
+MHW_med <- data.frame(lat=double(),
+                      lon=double(),
+                      date_start=Date(),
+                      date_end=Date(),
+                      duration=double(),
+                      intensity_mean=double(),
+                      intensity_max=double(),
+                      intensity_cumulative=double(),
+                      rate_onset=double(),
+                      rate_decline=double()
+)
+MHW_med_statistic <- data.frame(lat=double(),
+                                lon=double(),
+                                year=integer(),
+                                MHW_n=integer(),
+                                mean_duration=double(),
+                                max_duration=double(),
+                                mean_intensity=double(),
+                                max_intensity=double(),
+                                mean_cumulative_intenstity=double(),
+                                max_cumulative_intenstity=double(),
+                                sum_cumulative_intenstity=double(),
+)
+for (coord_num in 1:dim(coordinates_list)[1]) {
+  temp_point <- sst_long %>% filter(lat==coordinates_list$lat[coord_num] &coordinates_list$lon[coord_num])
+  #deleting lat and lon cause all in same position
+  temp_point <- temp_point[-1:-2]
+  temp_point <- temp_point %>% arrange(date)
+  names(temp_point) <- c("temp","t")
+  clim_period <- c(temp_point$t[1],"2011-08-25")
+  MHW_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 90)
+  # MCS_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 10)
+  MHW_events <- detect_event(MHW_climatelogy_tresh)
+  MHW_events <- MHW_events$event %>%    select(duration,date_start,date_end,intensity_mean,intensity_max,intensity_cumulative,rate_onset,rate_decline)
+  # MCS_events <- detect_event(MCS_climatelogy_tresh,coldSpells = T)
+  MHW_events$lat <- coordinates_list$lat[coord_num]
+  MHW_events$lon <- coordinates_list$lon[coord_num]  
+  MHW_med <- rbind(MHW_med,MHW_events)
+}
+event_line(MCS_events,start_date = "2021-12-01", end_date = "2023-06-30",spread=500)
+saveRDS(MHW_med,"MHW_Events_Med.RDS")
+write.csv(MHW_events$event,"MHW_Events_Bivalves.csv")
 write.csv(MCS_events$event,"MCS_Events_ISR.csv")
 
 ```

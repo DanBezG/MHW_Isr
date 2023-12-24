@@ -10,35 +10,33 @@ library(suntools)
 library(tidyverse)
 library(ggplot2)
 library(dplyr)
+library(lubridate)
 ```
 
 #load data
 ```{r}
-fish_df <-  readRDS("Renanel_raw.rds")
+fish_df <- readRDS("Dan data all data - linear array.rds")
+
 filter_fish <-  readRDS("Valuble_fish.RDS")
 ```
 
 #filter valuble_fish and compute sampling time frequncies
 ```{r}
-valuble_fish <- c(1255787,1255788,1255789,1255791,1255800,1255801,1255803,1255805,1255806,1255807,1255810,1255811,1255812,1255814,1255815)
-fish_df <- fish_df %>% filter(fish_id %in% valuble_fish)
-fish_df <- fish_df %>% arrange(fish_id,real_datetime)
-fish_df$date <- cut(fish_df$real_datetime,breaks = "day")
-fish_df$diff_samp_time_sec  <- NA
+valuble_fish <- c(1255785,1255787,1255788,1255789,1255791,1255800,1255801,1255803,1255805,1255806,1255807,1255809,1255810,1255811,1255812,1255814,1255815)
+filter_fish <- fish_df %>% filter(fish_id %in% valuble_fish)
+filter_fish <- filter_fish %>% arrange(fish_id,real_datetime)
+filter_fish$date <- cut(fish_df$real_datetime,breaks = "day")
+filter_fish$diff_samp_time_sec  <- NA
 for (row_num in 2:dim(fish_df)[1]) {
-    if (fish_df$fish_id[row_num]==fish_df$fish_id[row_num-1]) {
-      if (fish_df$date[row_num]==fish_df$date[row_num-1]) {
-        fish_df$diff_samp_time[row_num] <-     difftime(fish_df$real_datetime[row_num],fish_df$real_datetime[row_num-1],units = "secs")
-      }  
-      else {
-        fish_df$diff_samp_time[row_num] <- NA
-      }
+    if (filter_fish$fish_id[row_num] == filter_fish$fish_id[row_num-1]) {
+      filter_fish$diff_samp_time[row_num] <-ifelse (filter_fish$date[row_num] == filter_fish$date[row_num-1],
+                            difftime(filter_fish$real_datetime[row_num],filter_fish$real_datetime[row_num-1],units= "secs"),NA)
     }
   else {
-    fish_df$diff_samp_time[row_num] <- NA
+    filter_fish$diff_samp_time[row_num] <- NA
   }
 }
-fish_samp_freq_df <- fish_df %>% group_by(fish_id,date) %>% 
+fish_samp_freq_df <- filter_fish %>% group_by(fish_id,date) %>% 
   summarise(mean_freq_min = mean(diff_samp_time_sec,na.rm = T)/60,median_freq_min = median(diff_samp_time_sec,na.rm = T)/60, n = n())
 write.csv(fish_samp_freq_df,"fish_sampling_frequences.csv")
 ```
@@ -47,33 +45,32 @@ write.csv(fish_samp_freq_df,"fish_sampling_frequences.csv")
 ```{r}
 filter_fish$real_datetime <- parse_date_time(filter_fish$real_datetime, orders = "ymd HMS")
 heatwave_date <- parse_date_time("02-07-2017 00:00:00",orders = "dmy HMS")
+#A little bit weird solution to deal with parse_date_time gives NA to some times near midnight because of timezone 
+filter_fish$Date <- as.POSIXct(as.Date(filter_fish$real_datetime),tz="Asia/Jerusalem")
+sunriset_df <- data.frame(Date = unique(filter_fish$Date),
+                          sunrise = NA,
+                          sunset = NA)
 #random coordiantes in eilat
-filter_fish$sunrise <-sunriset(matrix(c(29.538417,34.954417),nrow=1), as.POSIXct(as.Date(filter_fish$datetime_GMT3),tz="IST"),direction = "sunrise", POSIXct.out = T)$time
-filter_fish$sunset <-sunriset(matrix(c(29.538417,34.954417),nrow=1), as.POSIXct(as.Date(filter_fish$datetime_GMT3),tz="IST"),direction = "sunset", POSIXct.out = T)$time
+sunriset_df$sunrise <-  sunriset(matrix(c(29.538417,34.954417),nrow=1), sunriset_df$Date,direction = "sunrise", POSIXct.out = T)$time
+sunriset_df$sunset <-  sunriset(matrix(c(29.538417,34.954417),nrow=1), sunriset_df$Date,direction = "sunset", POSIXct.out = T)$time
+sunriset_df$sunrise <- force_tz(sunriset_df$sunrise,tz="UTC")
+sunriset_df$sunset <- force_tz(sunriset_df$sunset,tz="UTC")
+filter_fish <- merge(filter_fish,sunriset_df,by = "Date",all.x = T)
+filter_fish <- filter_fish %>% select(-Date)
+filter_fish <- filter_fish %>% arrange(fish_id,real_datetime)
+
 for (row_num in 1:dim(filter_fish)[1]) {
-    if(filter_fish$real_datetime[row_num]>heatwave_date)
-    {
-      filter_fish$Before_After[row_num] <- "After"
-    }
-    else
-    {
-      filter_fish$Before_After[row_num] <- "Before"
-    }
-   if (filter_fish$real_datetime[row_num] > filter_fish$sunrise[row_num] && filter_fish$real_datetime[row_num] < filter_fish$sunset[row_num]) 
-    {
-      filter_fish$Day_night[row_num]<-"Day"
-    }
-  else
-    {
-      filter_fish$Day_night[row_num]<-"Night"
-    }
+    filter_fish$Before_After <- ifelse(filter_fish$real_datetime[row_num]>heatwave_date,"After","Before")
+    filter_fish$Day_night <- ifelse(filter_fish$real_datetime[row_num] > filter_fish$sunrise[row_num] && filter_fish$real_datetime[row_num] < filter_fish$sunset[row_num],"Day","Night") 
 }
+
+
 
 ```
 
 #save data
 ```{r}
-write.csv(filter_fish,"Valuble_fish.csv")
+write.csv(filter_fish,"Valuble_fish_before_after.csv")
 saveRDS(filter_fish,"Valuble_fish.RDS")
 ```
 

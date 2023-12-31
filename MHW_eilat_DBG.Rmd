@@ -13,6 +13,7 @@ library(dplyr)
 library(lubridate)
 ```
 
+
 #load data
 ```{r}
 fish_df <- readRDS("Dan data all data - linear array.rds")
@@ -25,20 +26,32 @@ filter_fish <-  readRDS("Valuble_fish.RDS")
 valuble_fish <- c(1255785,1255787,1255788,1255789,1255791,1255800,1255801,1255803,1255805,1255806,1255807,1255809,1255810,1255811,1255812,1255814,1255815)
 filter_fish <- fish_df %>% filter(fish_id %in% valuble_fish)
 filter_fish <- filter_fish %>% arrange(fish_id,real_datetime)
-filter_fish$date <- cut(fish_df$real_datetime,breaks = "day")
-filter_fish$diff_samp_time_sec  <- NA
-for (row_num in 2:dim(fish_df)[1]) {
-    if (filter_fish$fish_id[row_num] == filter_fish$fish_id[row_num-1]) {
-      filter_fish$diff_samp_time[row_num] <-ifelse (filter_fish$date[row_num] == filter_fish$date[row_num-1],
-                            difftime(filter_fish$real_datetime[row_num],filter_fish$real_datetime[row_num-1],units= "secs"),NA)
+filter_fish$date <- cut(filter_fish$real_datetime,breaks = "day")
+samp_freq_df <- data.frame(fish_id=integer(),
+                           date=POSIXct(),
+                           mean_freq_min=double(),
+                           median_freq_min=double(),
+                           n=integer())
+for (fish in valuble_fish) {
+  temp_fish <- filter_fish %>% filter(fish_id==fish)
+  for (day in unique(temp_fish$date)) {
+    temp_day <- temp_fish %>% filter(date==day)
+    freq_vector <- c()
+    for (row_num in 2:dim(temp_day)[1]) {
+      freq_vector[row_num-1] <- difftime(temp_day$real_datetime[row_num],temp_day$real_datetime[row_num-1],units = "mins")
+      
     }
-  else {
-    filter_fish$diff_samp_time[row_num] <- NA
+    temp_samp_df <- data.frame(fish_id=fish,
+                                 date=day,
+                                 mean_freq_min = mean(freq_vector),
+                                 median_freq_min= median(freq_vector),
+                                 n=length(freq_vector))
+    samp_freq_df <- rbind(samp_freq_df,temp_samp_df)
   }
+  
 }
-fish_samp_freq_df <- filter_fish %>% group_by(fish_id,date) %>% 
-  summarise(mean_freq_min = mean(diff_samp_time_sec,na.rm = T)/60,median_freq_min = median(diff_samp_time_sec,na.rm = T)/60, n = n())
-write.csv(fish_samp_freq_df,"fish_sampling_frequences.csv")
+rm(temp_day,temp_fish,temp_samp_df)
+write.csv(samp_freq_df,"fish_sampling_frequences.csv")
 ```
 
 #Add sunset.rise and Before.After
@@ -58,15 +71,22 @@ sunriset_df$sunset <- force_tz(sunriset_df$sunset,tz="UTC")
 filter_fish <- merge(filter_fish,sunriset_df,by = "Date",all.x = T)
 filter_fish <- filter_fish %>% select(-Date)
 filter_fish <- filter_fish %>% arrange(fish_id,real_datetime)
-
+filter_fish$Before_After <- ifelse(filter_fish$real_datetime>heatwave_date,"After","Before")
 for (row_num in 1:dim(filter_fish)[1]) {
-    filter_fish$Before_After <- ifelse(filter_fish$real_datetime[row_num]>heatwave_date,"After","Before")
-    filter_fish$Day_night <- ifelse(filter_fish$real_datetime[row_num] > filter_fish$sunrise[row_num] && filter_fish$real_datetime[row_num] < filter_fish$sunset[row_num],"Day","Night") 
+filter_fish$Day_night <- ifelse(filter_fish$real_datetime[row_num] > filter_fish$sunrise[row_num] && filter_fish$real_datetime[row_num] < filter_fish$sunset[row_num],"Day","Night") 
 }
-
-
-
 ```
+
+##Calculate longshore_movement
+```{r}
+for (fish in valuble_fish) {
+  temp_fish <- filter_fish %>% filter(fish_id==fish)
+  #get the northest position to standerize movement to
+  northest_position <- min(temp_fish$distance_shore)
+  temp_fish$longshore_movement <- temp_fish$distance_shore-northest_position
+}
+```
+
 
 #save data
 ```{r}

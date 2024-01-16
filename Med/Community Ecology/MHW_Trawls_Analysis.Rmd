@@ -1,0 +1,170 @@
+---
+title: "Trawls_Isr_Project"
+author: "Dan Bez Golanski"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+##packages
+```{r}
+library(tidyverse)
+library(openxlsx)
+library(lubridate)
+library(reshape2)
+```
+
+##Load Data 
+```{r}
+trawl_metadata <- read.xlsx("Med/Community Ecology/Isr_Trawls.xlsx",sheet = "Stats & Metadata")
+trawl_raw <- read.xlsx("Med/Isr_Trawls.xlsx",sheet = "Raw Samples and lengths")
+trawl_metadata$Date <- lubridate::dmy(trawl_metadata$Date)
+trawl_metadata$Date[7:8] <- "1990-09-30"
+trawl_metadata$Date <- as.Date(trawl_metadata$Date)
+MHW_metadata <- read.csv("Med/Community Ecology/MHW_Events_ISR_mean.csv")
+trawl_wide <- readRDS("Med/Community Ecology/Trawl_wide_format.RDS")
+```
+
+##Change trawls to wide 
+```{r}
+trawl_raw <- trawl_raw[,c(1:9,147)]
+names(trawl_raw) <- c("Period","Serial","Season","North_south","Depth_group","Night_day","Net_Type","Species","total")
+trawl_wide_format <- dcast(trawl_raw,Serial+Period+North_south+Night_day+Season+Depth_group+Net_Type~Species,value.var="total",sum)
+saveRDS(trawl_wide_format,"Trawl_wide_format.RDS")
+```
+
+
+##Associate MHW and trawls - not working good!
+```{r}
+trawls_year <- c(1990:1994,2000,2008:2012)
+names(MHW_metadata)[1] <- "Serial"
+trawl_metadata$year <- format(trawl_metadata$Date,"%Y")
+trawl_metadata <- trawl_metadata %>% filter(`Delta.depth(m)`<10)
+for (year_num in trawls_year) {
+  temp_MHW <- MHW_metadata %>% filter(year_num==year)
+  temp_trawl <- trawl_metadata %>% filter(year_num==year)
+  for (mhw_num in 1:dim(temp_MHW)[1]) {
+    diff_temp_start <- difftime(temp_trawl$Date,temp_MHW$date_start[mhw_num])
+    diff_temp_end <- difftime(temp_trawl$Date,as.Date(temp_MHW$date_start[mhw_num])+temp_MHW$duration[mhw_num])
+    diff_temp_start <- which(diff_temp_start<0 & diff_temp_start >-60)
+    diff_temp_end <-  which(diff_temp_end >0 & diff_temp_end <60)
+    start_trawls <- list(temp_trawl$Serial[diff_temp_start])
+    end_trawls <- list(temp_trawl$Serial[diff_temp_end])
+    MHW_metadata$before_Haul[temp_MHW$Serial[mhw_num]==MHW_metadata$Serial] <- start_trawls
+    MHW_metadata$After_Haul[temp_MHW$Serial[mhw_num]==MHW_metadata$Serial] <- end_trawls
+  }
+}
+MHW_Trawl_asscosiation <- MHW_metadata %>% select(Serial,year,date_start,before_Haul,After_Haul)
+for(row_num in 1:dim(MHW_Trawl_asscosiation)[1]) {
+   MHW_Trawl_asscosiation$before_Haul[row_num] <- toString(MHW_Trawl_asscosiation$before_Haul[[row_num]])
+   MHW_Trawl_asscosiation$After_Haul[row_num] <- toString(MHW_Trawl_asscosiation$After_Haul[[row_num]])
+}
+MHW_Trawl_asscosiation$before_Haul <- unlist(MHW_Trawl_asscosiation$before_Haul)
+MHW_Trawl_asscosiation$After_Haul <- unlist(MHW_Trawl_asscosiation$After_Haul)
+write.csv(MHW_Trawl_asscosiation,"MHW_trawl_associate.csv")
+  
+
+```
+
+##Filter relevent trawls & associate with MHW
+```{r}
+MHW_Trawl_asscosiation <- read.csv("Med/Community Ecology/MHW_trawl_associate.csv")
+#get the trawls number before and after separated and in new lists - before and after
+MHW_Trawl_asscosiation$before_Haul <- MHW_Trawl_asscosiation$before_Haul %>% strsplit(", ")
+MHW_Trawl_asscosiation$After_Haul <- MHW_Trawl_asscosiation$After_Haul %>% strsplit(", ")
+rel_trawls_list_before <- as.numeric(unlist(MHW_Trawl_asscosiation$before_Haul))
+rel_trawls_list_after <-  as.numeric(unlist(MHW_Trawl_asscosiation$After_Haul))
+#creating two temps df for before and after
+relevent_trawls_before_temp <- trawl_wide %>% filter(Serial %in% rel_trawls_list_before)
+relevent_trawls_after_temp <- trawl_wide %>% filter(Serial %in% rel_trawls_list_after)
+relevent_trawls_before_temp$Before.after <- "Before"
+relevent_trawls_after_temp$Before.after <- "After"
+relevent_trawls_before_temp <- relevent_trawls_before_temp %>% relocate(Before.after,.after=Period)
+relevent_trawls_after_temp <- relevent_trawls_after_temp %>% relocate(Before.after,.after=Period)
+relevent_trawls_before_temp$MHW_ID <- NA
+relevent_trawls_after_temp$MHW_ID <- NA
+relevent_trawls_before_temp <- relevent_trawls_before_temp %>% relocate(MHW_ID,.after=Before.after)
+relevent_trawls_after_temp <- relevent_trawls_after_temp %>% relocate(MHW_ID,.after=Before.after)
+#Associate each trawl with her MHW
+for (trawl_num in 1:dim(relevent_trawls_before_temp)[1]) {
+  
+  for (mhw_num in 1:dim(MHW_Trawl_asscosiation)[1]) {
+    if(relevent_trawls_before_temp$Serial[trawl_num] %in%  
+       unlist(MHW_Trawl_asscosiation$before_Haul[mhw_num])) 
+    {
+      relevent_trawls_before_temp$MHW_ID[trawl_num] <- MHW_Trawl_asscosiation$Serial[mhw_num]
+    }
+  }
+  
+}
+for (trawl_num in 1:dim(relevent_trawls_after_temp)[1]) {
+  
+  for (mhw_num in 1:dim(MHW_Trawl_asscosiation)[1]) {
+     if(relevent_trawls_after_temp$Serial[trawl_num] %in% 
+              unlist(MHW_Trawl_asscosiation$After_Haul[mhw_num]))
+    {
+      relevent_trawls_after_temp$MHW_ID[trawl_num] <- MHW_Trawl_asscosiation$Serial[mhw_num]
+    }
+  }
+  
+}
+#combine before and after
+relevent_trawls <- rbind(relevent_trawls_before_temp,relevent_trawls_after_temp)
+rm(relevent_trawls_after_temp,relevent_trawls_before_temp)
+```
+
+##Get trawls metadata
+```{r}
+##getting depth, area and trawl time
+for (trawl_num in 1:dim(relevent_trawls)[1]) {
+    relevent_trawls$Mean.Depth[trawl_num] <- 
+      trawl_metadata$`Mean.Depth[m]`[relevent_trawls$Serial[trawl_num]==trawl_metadata$Serial]
+    relevent_trawls$Area[trawl_num] <- 
+      trawl_metadata$Field[relevent_trawls$Serial[trawl_num]==trawl_metadata$Serial]  
+    relevent_trawls$Trawl.time[trawl_num] <- 
+      trawl_metadata$`Haul.Time.(hrs)`[relevent_trawls$Serial[trawl_num]==trawl_metadata$Serial]  
+}
+
+relevent_trawls <- relevent_trawls %>% relocate(Mean.Depth,.before = Depth_group)
+relevent_trawls <- relevent_trawls %>% relocate(Area,.after = MHW_ID)
+relevent_trawls <- relevent_trawls %>% relocate(Trawl.time,.after = Depth_group)
+saveRDS(relevent_trawls,"Com_Eco_MHW_Trawl_basic.RDS")
+```
+
+##Analyze data
+```{r}
+#calculate species richness
+relevent_trawls <- relevent_trawls %>% rowwise() %>% 
+  mutate(total_sp_number= sum(c_across(13:309) > 0, na.rm = TRUE))
+#calculate individual number
+relevent_trawls <- relevent_trawls %>% rowwise() %>% 
+  mutate(total_ind_number= sum(c_across(13:309), na.rm = TRUE))
+relevent_trawls <- relevent_trawls %>% relocate(total_sp_number,.after = Net_Type)
+relevent_trawls <- relevent_trawls %>% relocate(total_ind_number,.after = total_sp_number)
+saveRDS(relevent_trawls,"Com_Eco_MHW_Trawl_Analysis.RDS")
+```
+
+##Plots
+```{r}
+#species Vs Ind
+relevent_trawls %>% ggplot(aes(x=total_ind_number,y=total_sp_number))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  xlim(0,1500)
+#Species Vs depth
+relevent_trawls %>% ggplot(aes(x=Mean.Depth,y=total_sp_number))+
+  geom_point()+
+  geom_smooth(method = "lm")
+#Ind Vs depth
+relevent_trawls %>% ggplot(aes(x=Mean.Depth,y=total_ind_number))+
+  geom_point()+
+  geom_smooth(method = "lm")
+#Count by Depth group 
+relevent_trawls %>% ggplot()+
+  geom_bar(aes(x=as.factor(Depth_group),fill=Depth_group))
+  
+
+```
+
+
+
+

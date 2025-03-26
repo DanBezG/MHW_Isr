@@ -253,7 +253,7 @@ automate_model_selection <- function(data, response_var, family) {
   # -------------------------------------------
   model_formulas_with_species <- list(
     formula(best_with_MHW),
-    update.formula(formula(models_with_MHW[[1]]), . ~ . + species)
+    update.formula(formula(best_with_MHW), . ~ . + species)
   )
 
   models_with_species <- lapply(model_formulas_with_species, run_model_safely, data = data, family = family)
@@ -406,7 +406,7 @@ tags_metadata <- read.xlsx("Red Sea/Renanel All data/ID list fish.xlsx")
   
 #MHWs metadata according to different def and databases
 MHWs_Eilat_Fix_OISST <- read.xlsx("Red Sea/MHWs_def/MHW_OISST_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
-MHWs_Eilat_Moving_OISST <- read.xlsx("Red Sea/MHWs_def/MHW__detrend_31mm_OISST_Events_RedSea.xlsx",sheet = "Short_MHW_Events_Fixed")
+MHWs_Eilat_Moving_OISST <- read.xlsx("Red Sea/MHWs_def/MHW_Amazia_Events_RedSea_Jacox.xlsx",sheet = "Short_MHW_Events_Fixed")
 MHWs_Eilat_Fix_IUI <- read.xlsx("Red Sea/MHWs_def/MHW_IUI_1Daymean_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
 MHWs_Eilat_Fix_Amazia <- read.xlsx("Red Sea/MHWs_def/MHW_Amatzia_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
 
@@ -998,8 +998,8 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
     #using the right database
     filter_fish <- Filter_Fish(fish_ids,combined_parrotfish_df)  
     ####### takes the longer timespan, 3 times before and after the MHW #####
-    MHW_Data <- filter_fish %>% filter(date>= MHWs_Eilat$start_3[event] & date<= 
-                                              MHWs_Eilat$end_3[event])
+    MHW_Data <- filter_fish %>% filter(date>= MHWs_Eilat$start_1.5[event] & date<= 
+                                              MHWs_Eilat$end_1.5[event])
     MHW_Data <- Before_After_MHW(MHW_Data,MHWs_Eilat$date_start[event], MHWs_Eilat$date_end[event])
     
     #remove colums of fish ids
@@ -1198,7 +1198,27 @@ hist(MHWs_fish_data$log_depth) # Check distribution post-transformation
 # Remove Serial_fish_id levels that have only NA values for depth
 MHWs_fish_data_dep_filtered <- MHWs_fish_data %>%
   filter(!is.na(log_depth))
+
 unique(MHWs_fish_data_dep_filtered$Serial_fish_id)
+
+
+# Count the number of data points per date for each Serial_fish_id
+depth_counts <-  MHWs_fish_data_dep_filtered %>% 
+  group_by(Serial_fish_id,date) %>% 
+  summarise(n=n())
+
+# Compute the mean number of data points per Serial_fish_id
+mean_counts <- depth_counts %>%
+  group_by(Serial_fish_id) %>%
+  summarise(mean_count = mean(n), .groups = "drop")
+
+# Filter out Serial_fish_id values with mean count less than 72, 3 detections per hour mean
+MHWs_fish_data_dep_filtered <- MHWs_fish_data_dep_filtered %>%
+  filter(Serial_fish_id %in% mean_counts$Serial_fish_id[mean_counts$mean_count >= 72])
+
+unique(MHWs_fish_data_dep_filtered$Serial_fish_id)
+
+
 # Create the histogram plot with facets for each Serial_fish_id
 ggplot(MHWs_fish_data_dep_filtered, aes(x = log_depth)) +
   geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black", alpha = 0.7) +
@@ -1250,7 +1270,7 @@ smooth_values+
   ylab("Depth [m]")+
   xlab("Time of day")
 
-saveRDS(results_depths,"Red Sea/Results/Models/Depth_Models_OISST_detrended_31mm.RDS")
+saveRDS(results_depths,"Red Sea/Results/Models/Depth_Models_OISST_detrended_Jacox.RDS")
 
 ```
 ### Activity models
@@ -1317,7 +1337,7 @@ plot_smooths(results_activity$best_model, series = DecimalTimeOfDay, comparison 
 
 
 
-saveRDS(results_activity,"Red Sea/Results/Models/Act_Models_OISST_detrended_31mm.RDS")
+saveRDS(results_activity,"Red Sea/Results/Models/Act_Models_OISST_detrended_Jacox.RDS")
 
 
 ```

@@ -595,7 +595,7 @@ MHW_climatelogy_tresh$num_date <- as.numeric(MHW_climatelogy_tresh$t)
 MHW_climatelogy_tresh <- na.omit(MHW_climatelogy_tresh)
 warming_lm <- lm(anomaly~num_date,MHW_climatelogy_tresh)
 summary(warming_lm)
-sjPlot::plot_model(warming_lm,type = 'eff',show.data = T)
+sjPlot::plot_model(warming_lm,type = 'pred',show.data = T)
 sjPlot::plot_model(warming_lm,type = 'diag',show.data = T)
 MHW_climatelogy_tresh <- cbind(MHW_climatelogy_tresh,warming_lm$residuals)
 names(MHW_climatelogy_tresh)[9] <- "anomaly_detrend"

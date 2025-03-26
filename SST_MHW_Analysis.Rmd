@@ -1,0 +1,899 @@
+---
+title: "Copernicus_Med_MHW"
+author: "Dan Bez Golanski"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## Load packages
+```{r warning=FALSE}
+library(ncdf4) # for loading copernicus data
+library(lubridate)
+library(tidyverse)
+library(heatwaveR)
+library(openxlsx)
+library(sjPlot) # for liner detrending model
+library(ggpubr) # for linear regression equation and R squared in the IUI and Copernicus 
+library(zoo) # for moving median
+library(forecast)
+library(tidync) # For easily dealing with NetCDF data
+library(rerddap) # For easily downloading subsets of data
+library(doParallel) # For parallel processing
+
+```
+## Functions
+```{r}
+sst_copernicus_to_df <- function(coperniucs_nc,names_vector,depth,Celsuis) {
+dim_lon <- ncvar_get(coperniucs_nc,names_vector[1])
+dim_lat <- ncvar_get(coperniucs_nc,names_vector[2])
+dim_time <- ncvar_get(coperniucs_nc,names_vector[3])
+t_units <- ncatt_get(coperniucs_nc,"time","units") 
+t_ustr <- strsplit(t_units$value, " ")
+t_dstr <- strsplit(unlist(t_ustr)[3], "-")
+sst <- ncvar_get(coperniucs_nc,names_vector[4],collapse_degen = F)
+# analysis_error <- ncvar_get(coperniucs_nc,"analysis_error",collapse_degen = F)
+sst_wide <- as.matrix(expand.grid(dim_lon,dim_lat))
+sst_wide <- as.data.frame(sst_wide)
+names(sst_wide) <- c("lon","lat")
+sst_wide <- sst_wide %>% arrange(lon)
+for (year_i in 1:length(dim_time)) {
+  if (depth) temp_date <-sst[,,,year_i] else temp_date <-sst[,,year_i] #If more than one depth this row need to be changed 
+  temp_date <- t(temp_date)
+  vec_temp_date <- c(temp_date)
+  sst_wide[,year_i+2] <- vec_temp_date
+}
+names(sst_wide) <- c("lon","lat",dim_time)
+sst_long <- cbind(sst_wide[1:2], stack(sst_wide[3:dim(sst_wide)[2]]))
+names(sst_long) <- c("lon","lat","sst","date")
+sst_long <- na.omit(sst_long)
+sst_long$date <- as.numeric(as.character(sst_long$date))
+sst_long$date <- ymd(t_dstr)+ dseconds(sst_long$date)
+if (!Celsuis) sst_long$sst <- sst_long$sst - 273.15
+return(sst_long)
+}
+
+Detrend_MHW_days_to_MHWs <- function(deterend_df, date_col_num, MHW_day_col_num, residuals_col_num, origin_col_num, threshold_col_num) {
+  
+# Initialize an empty data frame to store MHWs data with various attributes
+MHWs_df <- data.frame(date_start=NA,
+                        date_end=NA,
+                        date_peak=NA,
+                        duration=NA,
+                        intensity_mean=NA,
+                        intensity_max=NA,
+                        intensity_var=NA,
+                        intensity_cum=NA,
+                        intensity_mean_abs=NA,
+                        intensity_max_abs=NA,
+                        intensity_var_abs=NA,
+                        intensity_mean_relThresh=NA,
+                        intensity_max_relThresh=NA,
+                        intensity_var_relThresh=NA,
+                        rate_onset=NA,
+                        rate_decline=NA
+                        )
+
+  # Create lists to store information about MHWs
+  resid_mhw <- list()       # Stores the residual values during the MHW event
+  absolute_mhw <- list()    # Stores the original values during the MHW event
+  thresh_mhw <- list()      # Stores the threshold values during the MHW event
+  
+  # Variable to store the start date of an MHW event
+  date_start <- NA
+  for (day_i in 1:length(deterend_df[, date_col_num])) {
+    
+    # If it's the start of a new MHW event
+    if(deterend_df[day_i, MHW_day_col_num] == TRUE && is.na(date_start)) {
+      date_start <- deterend_df[day_i, date_col_num]  # Set the start date of the event
+      resid_mhw <- append(resid_mhw, deterend_df[day_i, residuals_col_num])  # Append the residual value
+      absolute_mhw <- append(absolute_mhw, deterend_df[day_i, origin_col_num])  # Append the original value
+      thresh_mhw <- append(thresh_mhw, deterend_df[day_i, residuals_col_num] - deterend_df[day_i, threshold_col_num])  # Append the threshold difference
+      mhw_gap <- 0  # Initialize gap counter
+      
+    } 
+    
+    # If the event continues (another day marked as MHW)
+    else if(deterend_df[day_i, MHW_day_col_num] == TRUE && !is.na(date_start)) {
+      resid_mhw <- append(resid_mhw, deterend_df[day_i, residuals_col_num])
+      absolute_mhw <- append(absolute_mhw, deterend_df[day_i, origin_col_num])
+      thresh_mhw <- append(thresh_mhw, deterend_df[day_i, residuals_col_num] - deterend_df[day_i, threshold_col_num])
+      mhw_gap <- 0
+      
+    } 
+    
+    # If the event has ended and the gap exceeds 2 days
+    else if (deterend_df[day_i, MHW_day_col_num] == FALSE && !is.na(date_start)) {
+      mhw_gap <- mhw_gap + 1  # Increase the gap counter
+      
+      # If the gap exceeds 2 days, the MHW event is considered finished
+      if(mhw_gap > 2) {
+        
+        # If the MHW event lasted more than 5 days, calculate various metrics and store them
+        if(length(resid_mhw) > 5) {
+          temp_df <- data.frame(date_start = date_start,
+                                date_end = deterend_df[day_i - 1, date_col_num],  # End date is the last day of the event
+                                date_peak = date_start + which.max(unlist(resid_mhw) - 1),  # Peak date based on maximum residual
+                                duration = deterend_df[day_i, date_col_num] - date_start,  # Duration of the event
+                                intensity_mean = mean(unlist(resid_mhw)),  # Mean intensity of the MHW event
+                                intensity_max = max(unlist(resid_mhw)),  # Maximum intensity of the MHW event
+                                intensity_var = sd(unlist(resid_mhw)),  # Standard deviation of intensity
+                                intensity_cum = sum(unlist(resid_mhw)),  # Cumulative intensity of the event
+                                intensity_mean_abs = mean(unlist(absolute_mhw)),  # Mean absolute intensity
+                                intensity_max_abs = max(unlist(absolute_mhw)),  # Maximum absolute intensity
+                                intensity_var_abs = sd(unlist(absolute_mhw)),  # Standard deviation of absolute intensity
+                                intensity_mean_relThresh = mean(unlist(thresh_mhw)),  # Mean intensity relative to the threshold
+                                intensity_max_relThresh = max(unlist(thresh_mhw)),  # Maximum intensity relative to the threshold
+                                intensity_var_relThresh = sd(unlist(thresh_mhw)),  # Standard deviation of intensity relative to threshold
+                                rate_onset = max(unlist(resid_mhw)) / which.max(unlist(resid_mhw)),  # Rate of onset (intensity over time)
+                                rate_decline = max(unlist(resid_mhw)) / if(length(resid_mhw) - which.max(unlist(resid_mhw)) == 0) 1 else (length(resid_mhw) - which.max(unlist(resid_mhw)) + 1)  # Rate of decline
+          )
+          
+          # Append the calculated MHW event data to the MHWs_df data frame
+          MHWs_df <- rbind(MHWs_df, temp_df)
+        }
+        
+        # Reset the variables for the next MHW event
+        mhw_gap <- 0
+        resid_mhw <- list()
+        absolute_mhw <- list()
+        thresh_mhw <- list()
+        date_start <- NA
+      }
+    }
+  }
+
+  # If any rows were added to MHWs_df, remove the initial NA row
+  if(dim(MHWs_df)[1] > 0) {
+    MHWs_df <- MHWs_df[-1,]
+  }
+
+  # Convert date columns to Date type
+  MHWs_df$date_start <- as.Date(MHWs_df$date_start)
+  MHWs_df$date_end <- as.Date(MHWs_df$date_end)
+  MHWs_df$date_peak <- as.Date(MHWs_df$date_peak)
+
+  # Return the MHW events data frame
+  return(MHWs_df)
+}
+Draw_sst_time <- function(sst_df,lat_f=NA, lon_f=NA,one_cor=T) {
+  if(one_cor)
+  {
+    sst_df <- sst_df %>% filter(lat == sst_df$lat[1] & lon == sst_df$lon[1])
+  } else if (is.na(lat_f) | is.na(lon_f)) {
+    stop("lat or lon is missing")
+  } else
+  {
+  sst_df <- sst_df %>% filter(lat == lat_f & lon == lon_f)
+  }
+  ggplot()+
+  geom_point(aes(x=sst_df$date,sst_df$sst)) +
+  ylab("SST")+
+  xlab("Date")
+  
+}
+OISST_sub_dl <- function(time_df){
+  OISST_dat <- griddap(datasetx = "ncdcOisst21Agg_LonPM180", 
+                       url = "https://coastwatch.pfeg.noaa.gov/erddap/", 
+                       time = c(time_df$start, time_df$end), 
+                       zlev = c(0, 0),
+                       latitude = c(29.472, 29.578),
+                       longitude = c(34.894, 35.017),
+                       fields = "sst")$data %>% 
+    mutate(time = as.Date(stringr::str_remove(time, "T00:00:00Z"))) %>% 
+    dplyr::rename(t = time, temp = sst,lon = longitude, lat = latitude) %>% 
+    select(lon, lat, t, temp) %>% 
+    na.omit()
+}
+
+```
+
+## Load data
+```{r}
+
+# Med Sea
+med_sst_long<- readRDS("Med/Israel Climtology/Coper_SST_Med.RDS")
+territorial_water_coord_med_cop <-read.csv("Med/Community Ecology/Isr_teritorial_water_locations.csv") 
+territorial_water_coord_med_cop <- territorial_water_coord_med_cop %>% select(Station,Longitude.,Latitude.d)
+
+# Red Sea
+#daily data from web with avg between max and min from continuous data
+sst_Eilat_IUI_daily <- read.xlsx("Red Sea/Eilat climetology/IUI/Eilat Daily Metro_fix_outliers.xlsx")
+sst_Eilat_IUI_daily <- sst_Eilat_IUI_daily[-1:-4,]
+colnames(sst_Eilat_IUI_daily) <- c("num_date","Temp_max","Temp_min","Temp_avg")
+sst_Eilat_IUI_daily$Date <- as.Date(as.numeric(sst_Eilat_IUI_daily$num_date),origin = "1899-12-30")
+sst_Eilat_IUI_daily$Temp_avg <- as.numeric(sst_Eilat_IUI_daily$Temp_avg)
+
+sst_IUI_10_min <- read.csv("Red Sea/Eilat climetology/IUI/SST_Eilat_IUI_10min.csv")
+sst_IUI_1day <- readRDS("Red Sea/Eilat climetology/IUI/SST_Eilat_IUI_1day.RDS")# this dataset is derived from the 10 min dataset and is calculated in "IUI 10min format handling and convert to 1day" section
+
+OISST_data_red <- readRDS("Red Sea/Eilat climetology/OISST_SST_Red.RDS")
+
+IUI_amatzia_daily_temp <-read.xlsx("Red Sea/Eilat climetology/Amazia - IUI/Obs Pier SST measured and interpolated 1988-2023.xlsx",sheet = "Interpolation") 
+
+```
+
+## Load ncdf
+```{r}
+med_coperniucs_nc <- nc_open("Med/Israel Climtology/cmems_SST_MED_SST_L4_REP_OBSERVATIONS_010_021_1732629959487.nc")
+#OSTIA
+red_copernicus_nc <- nc_open("Red Sea/Eilat climetology/METOFFICE-GLO-SST-L4-REP-OBS-SST_1705328292068.nc")
+#ESA & CCI
+red_copernicus_nc_2017 <- nc_open("Red Sea/Eilat climetology/ESACCI-GLO-SST-L4-REP-OBS-SST_1711473070752.nc")
+red_copernicus_nc_2022 <- nc_open("Red Sea/Eilat climetology/C3S-GLO-SST-L4-REP-OBS-SST_1711473119162.nc")
+#Physics
+red_copernicus_nc_physics <- nc_open("Red Sea/Eilat climetology/cmems_mod_glo_phy_my_0.083deg_P1D-m_1711477180532.nc")
+noaa_sst <- nc_open("../../NOAA OISTT v2/subset_try.nc")
+```
+
+## Get OISST
+```{r}
+rerddap::info(datasetid = "ncdcOisst21Agg_LonPM180", url = "https://coastwatch.pfeg.noaa.gov/erddap/")
+
+dl_years <- data.frame(date_index = 1:5,
+                       start = c("1982-01-01", "1990-01-01", 
+                                         "1998-01-01", "2006-01-01", "2014-01-01"),
+                       end = c("1989-12-31", "1997-12-31", 
+                                       "2005-12-31", "2013-12-31", "2022-12-31"))
+# Download all of the data with one nested request
+# The time this takes will vary greatly based on connection speed
+system.time(
+  OISST_data <- dl_years %>% 
+    group_by(date_index) %>% 
+    group_modify(~OISST_sub_dl(.x)) %>% 
+    ungroup() %>% 
+    select(lon, lat, t, temp)
+) # 38 seconds, ~8 seconds per batch
+saveRDS(OISST_data,"Red Sea/Eilat climetology/OISST_SST_Red.RDS")
+```
+## Create dataframe from copernicus nc
+```{r}
+med_sst_long <- sst_copernicus_to_df(med_coperniucs_nc,c("longitude","latitude","time","analysed_sst"),F,F)
+#Physics
+
+saveRDS(med_sst_long,"Coper_SST_Med.RDS")
+```
+
+
+## IUI 10min format handling and convert to 1day
+```{r}
+sst_IUI_10_min$Average.temp <- as.double(sst_IUI_10_min$Average.temp)
+sst_IUI_10_min <- sst_IUI_10_min %>% select(DateTime,Average.temp)
+sst_IUI_10_min <- na.omit(sst_IUI_10_min)
+sst_IUI_10_min$excel <- parse_date_time(sst_IUI_10_min$DateTime,c("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M"))
+sst_IUI_10_min$day <- cut(sst_IUI_10_min$excel,breaks = "1 day")
+sst_IUI_1day <- sst_IUI_10_min %>% 
+  select(excel,day,Average.temp) %>% 
+  group_by(day) %>% 
+  summarise_at(vars(Average.temp) ,funs(mean,n()))
+missing_days <- 0
+sst_IUI_1day$day <- as.Date(sst_IUI_1day$day)
+
+for (day_i in 2:nrow(sst_IUI_1day)) {
+      temp_diff <-as.numeric(difftime(sst_IUI_1day$day[day_i],sst_IUI_1day$day[day_i-1],units = 
+                                        "days"))
+      if (temp_diff>1) {
+        missing_days <- missing_days + temp_diff
+      }
+}
+print(paste("There are",missing_days,"missing days."))
+ggplot(sst_IUI_1day)+
+  geom_point(aes(x=day,y=mean))+
+  scale_x_date(breaks = "1 year")+
+  xlab("Date")+
+  ylab("Avg daily temp")
+saveRDS(sst_IUI_1day,"Red Sea/Eilat climetology/IUI/SST_Eilat_IUI_1day.RDS")
+## There are 43 missing days in this database
+```
+
+## Calculate climatelogy for whole med and MHW's events
+```{r} 
+
+coordinates_list <- med_sst_long %>% filter(date==med_sst_long$date[1])
+coordinates_list <- coordinates_list %>% select(lat,lon)
+MHW_med <- data.frame(lat=double(),
+                      lon=double(),
+                      date_start=Date(),
+                      date_end=Date(),
+                      duration=double(),
+                      intensity_mean=double(),
+                      intensity_max=double(),
+                      intensity_cumulative=double(),
+                      rate_onset=double(),
+                      rate_decline=double()
+)
+for (coord_num in 1:dim(coordinates_list)[1]) {
+  temp_point <- med_sst_long %>% filter(lat==coordinates_list$lat[coord_num] &coordinates_list$lon[coord_num])
+  #deleting lat and lon cause all in same position
+  temp_point <- temp_point[-1:-2]
+  temp_point <- temp_point %>% arrange(date)
+
+  names(temp_point) <- c("temp","t")
+  clim_period <- c(temp_point$t[1],"2011-08-25")
+  MHW_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 90)
+  # MCS_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 10)
+  MHW_events <- detect_event(MHW_climatelogy_tresh)
+  MHW_events <- MHW_events$event %>%    select(duration,date_start,date_end,intensity_mean,intensity_max,intensity_cumulative,rate_onset,rate_decline)
+  # MCS_events <- detect_event(MCS_climatelogy_tresh,coldSpells = T)
+  MHW_events$lat <- coordinates_list$lat[coord_num]
+  MHW_events$lon <- coordinates_list$lon[coord_num]  
+  MHW_med <- rbind(MHW_med,MHW_events)
+  print(coord_num)
+}
+MHW_med$year <- format(MHW_med$date_start,"%Y")
+saveRDS(MHW_med,"MHW_Events_Isr_Med_allpoints.RDS")
+write.csv(MHW_med,"MHW_Events_Isr_Med_allpoints.csv")
+
+```
+
+
+## Calculate climatelogy for specific point 
+```{r}
+# Set playground coordinates (latitude and longitude for a specific location).
+playground_coord <- c(32.38210, 34.82362)
+
+# Filter the Mediterranean Sea SST dataset for the specified coordinates.
+# Round latitudes and longitudes to 5 decimal places to  match them with playground_coord.
+med_sst_coord <- med_sst_long[
+  round(med_sst_long$lat, 5) == playground_coord[1] & 
+  round(med_sst_long$lon, 5) == playground_coord[2],
+]
+
+# Remove latitude and longitude columns from the filtered data
+# since all values correspond to the same location.
+sst_coord <- med_sst_coord %>% select(-lat, -lon)
+
+# Arrange the SST data by date for proper temporal analysis.
+sst_coord <- sst_coord %>% arrange(date)
+
+# Rename the columns for consistency and clarity:
+# "temp" represents sea surface temperature (SST), and "t" represents the date.
+names(sst_coord) <- c("temp", "t")
+
+# Define the climatology period for SST analysis.
+# The climatology period starts from the first date in the data and preferably ends 30 years later.
+clim_period <- c(sst_coord$t[1], "2011-08-25")
+
+# Compute the climatology and the 90th percentile threshold for marine heatwave (MHW) detection.
+MHW_climatelogy_tresh <- ts2clm(sst_coord, climatologyPeriod = clim_period, pctile = 90)
+
+# Optional: Uncomment this section to calculate thresholds for marine cold spells (MCS).
+# MCS_climatelogy_tresh <- ts2clm(sst_coord, climatologyPeriod = clim_period, pctile = 10)
+
+# Detect marine heatwave (MHW) events based on the climatology and threshold.
+MHW_events <- detect_event(MHW_climatelogy_tresh)
+
+# Optional: Uncomment this section to detect marine cold spell (MCS) events.
+# MCS_events <- detect_event(MCS_climatelogy_tresh, coldSpells = TRUE)
+
+# Categorize detected MHW events.
+MHW_events_cat <- category(MHW_events)
+
+# Rename the peak date column for clarity and consistency.
+MHW_events_cat <- MHW_events_cat %>% rename("date_peak" = "peak_date")
+
+# Extract the climatology data for visualization or further analysis.
+climatelogy <- MHW_events$climatology
+
+# Select relevant columns from the detected MHW events.
+MHW_events <- MHW_events$event %>% select(-index_start, -index_peak, -index_end)
+
+# Merge the categorized event information (e.g., intensity category) with the main MHW events data.
+MHW_events <- merge(MHW_events, MHW_events_cat[, c("event_no", "category")], by = "event_no")
+
+# Add the latitude and longitude of the playground location to each MHW event.
+MHW_events$lat <- playground_coord[1]
+MHW_events$lon <- playground_coord[2]
+
+# Extract the year and month from the event start date for temporal analysis.
+MHW_events$year <- format(MHW_events$date_start, "%Y")
+MHW_events$month <- format(MHW_events$date_start, "%m")
+
+# Create a histogram of the months with the most MHW events.
+# The histogram focuses on short-duration events (less than 31 days) after certain year.
+hist(as.numeric(MHW_events$month[MHW_events$duration < 31 & MHW_events$year > 2014]))
+
+```
+
+## MHW Isr_med_statistics_allpoints
+```{r}
+#Statistics for Israeli coast 
+MHW_med_sum_year_date_start <- MHW_med %>% group_by(year,date_start,duration) %>% summarise(Coord_num=n(),avg_mean_intensity=mean(intensity_mean),avg_max_intensity=mean(intensity_max),avg_intensity_cummelative=mean(intensity_cumulative),avg_onset_rate=mean(rate_onset),avg_decline_rate=mean(rate_decline))
+MHW_med_sum_year_date_start$area_ratio <- MHW_med_sum_year_date_start$Coord_num/1443
+MHW_med_spatial_filter <- MHW_med_sum_year_date_start[MHW_med_sum_year_date_start$area_ratio>0.2,]
+write.csv(MHW_med_spatial_filter,"Isr_MHW_Med_0.2_area_filter.csv")
+
+```
+
+
+## Compute marine heat waves for the territorial israeli coast mean sst
+```{r}
+coordinates_list <- med_sst_long %>% filter(date==med_sst_long$date[1])
+med_sst_long$lat <- round(med_sst_long$lat,4)
+med_sst_long$lon <- round(med_sst_long$lon,4)
+territorial_water_coord_med_cop$Longitude. <- round(territorial_water_coord_med_cop$Longitude.,4)
+territorial_water_coord_med_cop$Latitude.d <- round(territorial_water_coord_med_cop$Latitude.d,4)
+territorial_water_coord_med_cop$coord <- paste(territorial_water_coord_med_cop$Longitude.,territorial_water_coord_med_cop$Latitude.d)
+med_sst_long$coord <- paste(med_sst_long$lon,med_sst_long$lat)
+med_ter_ISR_sst <- med_sst_long %>% filter(coord %in% territorial_water_coord_med_cop$coord)
+#The result of the filtering missing 14 points from two different longitudes : 34.52335 & 35.07385
+mean_Isr_coast <- med_ter_ISR_sst %>%
+  group_by(date) %>%
+  summarise(mean_sst=mean(sst))
+
+clim_period <- c(mean_Isr_coast$date[1],"2011-08-25")
+names(mean_Isr_coast) <- c("t","temp")
+MHW_climatelogy_tresh <- ts2clm(mean_Isr_coast,climatologyPeriod = clim_period,pctile = 90)
+# MCS_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 10)
+MHW_events <- detect_event(MHW_climatelogy_tresh)
+event_line(MHW_events)
+MHW_events <- MHW_events$event %>%    select(duration,date_start,date_end,date_peak,intensity_mean,intensity_max,intensity_cumulative,rate_onset,rate_decline)
+write.csv(MHW_events,"Med/Community Ecology/MHW_Isr_mean_territorial_waters.csv")
+```
+
+## Calculate climatelogy for red sea(OISST) and MHW's events
+```{r} 
+OISST_data_red <- OISST_data_red %>%  select(-lat,-lon)
+OISST_data_red <- OISST_data_red %>% arrange(t)
+clim_period <- c(OISST_data_red$t[1],as.Date("2011-12-31"))#edit date to 30 years from beginning if data is available
+MHW_climatelogy_tresh <- ts2clm(OISST_data_red,climatologyPeriod = clim_period,pctile = 90)
+MHW_events <- detect_event(MHW_climatelogy_tresh)
+# MCS_climatelogy_tresh <- ts2clm(red_sst_long,climatologyPeriod = clim_period,pctile = 10)
+# MCS_events <- detect_event(MCS_climatelogy_tresh)
+# MCS_events <- MCS_events$event
+MHW_events_cat <- category(MHW_events)
+MHW_events_cat <- MHW_events_cat %>% rename("date_peak" = "peak_date")
+climatelogy <- MHW_events$climatology
+MHW_events <- MHW_events$event %>% select(-index_start, -index_peak, -index_end)
+MHW_events <- merge(MHW_events,MHW_events_cat[,c("event_no","category")],by="event_no")
+hist(MHW_events$intensity_mean)
+# MCS_events <- detect_event(MCS_climatelogy_tresh,coldSpells = T)
+excel <- createWorkbook()
+addWorksheet(excel,sheetName = "MHW_Events")
+addWorksheet(excel,sheetName = "Climatelogy")
+writeData(excel,"MHW_Events",MHW_events)
+writeData(excel,"Climatelogy",climatelogy)
+saveWorkbook(excel,"Red Sea/Eilat 2017 MHW/MHWs/MHW_OISST_Events_RedSea_Fix")#add description to name according to database used
+
+```
+## Calculate climatelogy for red sea(Amatzia) and MHW's events
+```{r} 
+IUI_amatzia_daily_temp$date <- as.Date(IUI_amatzia_daily_temp$Doy,origin = as.Date(paste(IUI_amatzia_daily_temp$Year,"-01-01",sep = ""))-1)
+IUI_amatzia_daily_temp <- IUI_amatzia_daily_temp %>%
+  select(date,SST) %>% 
+  rename("t"="date","temp"="SST")
+clim_period <- c(IUI_amatzia_daily_temp$t[1],as.Date("2015-12-31"))#edit date to 30 years from beginning if data is available
+MHW_climatelogy_tresh <- ts2clm(IUI_amatzia_daily_temp,climatologyPeriod = clim_period,pctile = 90)
+MHW_events <- detect_event(MHW_climatelogy_tresh)
+# MCS_climatelogy_tresh <- ts2clm(red_sst_long,climatologyPeriod = clim_period,pctile = 10)
+# MCS_events <- detect_event(MCS_climatelogy_tresh)
+# MCS_events <- MCS_events$event
+MHW_events_cat <- category(MHW_events)
+MHW_events_cat <- MHW_events_cat %>% rename("date_peak" = "peak_date")
+climatelogy <- MHW_events$climatology
+MHW_events <- MHW_events$event %>% select(-index_start, -index_peak, -index_end)
+MHW_events <- merge(MHW_events,MHW_events_cat[,c("event_no","category")],by="event_no")
+hist(MHW_events$intensity_mean,breaks = seq(from=0.4, to=3, by=0.2))
+# MCS_events <- detect_event(MCS_climatelogy_tresh,coldSpells = T)
+excel <- createWorkbook()
+addWorksheet(excel,sheetName = "MHW_Events")
+addWorksheet(excel,sheetName = "Climatelogy")
+writeData(excel,"MHW_Events",MHW_events)
+writeData(excel,"Climatelogy",climatelogy)
+saveWorkbook(excel,"Red Sea/Eilat 2017 MHW/MHWs/MHW_Amatzia_Events_RedSea_Fix.xlsx")#add description to name according to database used
+
+```
+## Calculate climatelogy for Red(IUI) and MHW's events
+```{r}
+names(sst_IUI_1day) <-c("t","temp","n") 
+sst_IUI_1day <- sst_IUI_1day[,c(1,2)]
+clim_period <- c(sst_IUI_1day$t[1],as.Date("2015-12-31"))
+MHW_climatelogy_tresh <- ts2clm(sst_IUI_1day,climatologyPeriod = clim_period,pctile = 90)
+# MCS_climatelogy_tresh <- ts2clm(temp_point,climatologyPeriod = clim_period,pctile = 10)
+MHW_events <- detect_event(MHW_climatelogy_tresh)
+climatelogy <- MHW_events$climatology
+MHW_events <- MHW_events$event %>%    select(date_start,date_end,duration,intensity_mean,intensity_max,intensity_cumulative,rate_onset,rate_decline)
+# MCS_events <- detect_event(MCS_climatelogy_tresh,coldSpells = T)
+excel <- createWorkbook()
+addWorksheet(excel,sheetName = "MHW_Events")
+addWorksheet(excel,sheetName = "Climatelogy")
+writeData(excel,"MHW_Events",MHW_events)
+writeData(excel,"Climatelogy",climatelogy)
+saveWorkbook(excel,"Red Sea/Eilat 2017 MHW/MHWs/MHW_IUI_1Daymean_Events_RedSea_Fix.xlsx")
+```
+
+
+
+## Compare IUI and Coper/OISST data
+```{r}
+compare_sst <- OISST_data_red
+compare_sst$year <- year(compare_sst$t)
+compare_sst <- compare_sst %>% filter(year>=2006)
+compare_sst$Date <- as.Date(compare_sst$t)
+sst_IUI_1day <- sst_IUI_1day %>% rename("Date"="day")
+#merge dataset  mean_1Day
+compare_sst <- merge(compare_sst,sst_IUI_1day[,c(1:2)],by = "Date")
+#merge dataset daily
+compare_sst <- merge(compare_sst,sst_Eilat_IUI_daily[,c(4:5)],by = "Date")
+
+compare_sst <- compare_sst %>% rename("temp_OISST" = "temp",
+                                      "mean_1Day"="mean",
+                                      "temp_daily"="Temp_avg")
+#correlation OISST and mean_1Day
+ggplot(compare_sst,aes(x=temp_OISST,y=mean_1Day))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  stat_regline_equation(label.x=21, label.y=27.5) +
+  stat_cor(aes(label=..rr.label..), label.x=21, label.y=27)+
+  xlab("OISST")+
+  ylab("IUI mean 1 Day")+
+  theme_bw()
+
+#correlation OISST and daily
+ggplot(compare_sst,aes(x=mean_1Day,y=temp_daily))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  stat_regline_equation(label.x=21, label.y=27.5) +
+  stat_cor(aes(label=..rr.label..), label.x=21, label.y=27)+
+  xlab("IUI mean 1Day")+
+  ylab("IUI web daily")+
+  theme_bw()
+
+#correlation IUI daily and mean 1Day
+ggplot(compare_sst,aes(x=temp_OISST,y=temp_daily))+
+  geom_point()+
+  geom_smooth(method = "lm")+
+  stat_regline_equation(label.x=21, label.y=27.5) +
+  stat_cor(aes(label=..rr.label..), label.x=21, label.y=27)+
+  xlab("OISST")+
+  ylab("IUI web daily")+
+  theme_bw()
+
+#Timeseries OISST and mean 1Day
+ggplot(compare_sst)+
+  geom_point(aes(x=Date,y=temp_OISST,color = "OISST"))+
+  geom_point(aes(x=Date,y=mean_1Day,color = "IUI mean 1 Day"))+
+  scale_x_date(breaks = "6 month",date_labels = "%m-%y")+
+  theme_bw()
+
+#Timeseries OISST and IUI daily 
+ggplot(compare_sst)+
+  geom_point(aes(x=Date,y=temp_OISST,color = "OISST"))+
+  geom_point(aes(x=Date,y=temp_daily,color = "IUI daily"))+
+  scale_x_date(breaks = "6 month",date_labels = "%m-%y")+
+  theme_bw()
+
+#Timeseries mean 1Day and IUI daily 
+ggplot(compare_sst)+
+  geom_point(aes(x=Date,y=mean_1Day,color = "IUI mean 1 Day"))+
+  geom_point(aes(x=Date,y=temp_daily,color = "IUI daily"))+
+  scale_x_date(breaks = "6 month",date_labels = "%m-%y")+
+  theme_bw()
+
+```
+
+# Detrending
+## Jacox 2020
+```{r}
+# OISST start
+red_sst_JACOX <- OISST_data_red %>% filter(lat == OISST_data_red$lat[1] &lon == OISST_data_red$lon[1])
+red_sst_JACOX <- red_sst_JACOX %>%  select(-lat,-lon)
+red_sst_JACOX <- red_sst_JACOX %>% arrange(t)
+
+# Amazia start
+red_sst_JACOX <- IUI_amatzia_daily_temp
+red_sst_JACOX <- red_sst_JACOX %>%
+  mutate(t = as.Date(Doy - 1, origin = paste0(Year, "-01-01"))) %>%
+  select(t, temp = SST)  # Rename columns
+
+# Climatology calculation
+clim_period <- c(red_sst_JACOX$t[1],as.Date("2015-12-31"))#edit date to 30 years from beginning if data is available
+MHW_climatelogy_tresh <- ts2clm(red_sst_JACOX,climatologyPeriod = clim_period,pctile = 90)
+MHW_climatelogy_tresh$anomaly <- MHW_climatelogy_tresh$temp-MHW_climatelogy_tresh$seas
+MHW_climatelogy_tresh$anomaly_thresh <- MHW_climatelogy_tresh$thresh-MHW_climatelogy_tresh$seas
+
+# Detrend anomaly
+MHW_climatelogy_tresh$num_date <- as.numeric(MHW_climatelogy_tresh$t)
+MHW_climatelogy_tresh <- na.omit(MHW_climatelogy_tresh)
+warming_lm <- lm(anomaly~num_date,MHW_climatelogy_tresh)
+summary(warming_lm)
+sjPlot::plot_model(warming_lm,type = 'eff',show.data = T)
+sjPlot::plot_model(warming_lm,type = 'diag',show.data = T)
+MHW_climatelogy_tresh <- cbind(MHW_climatelogy_tresh,warming_lm$residuals)
+names(MHW_climatelogy_tresh)[9] <- "anomaly_detrend"
+MHW_climatelogy_tresh$MHW_d <- ifelse(MHW_climatelogy_tresh$anomaly_detrend>MHW_climatelogy_tresh$anomaly_thresh,T,F)
+colnames(MHW_climatelogy_tresh)[2] <- "date"
+MHW_climatelogy_tresh$date <- as.Date(MHW_climatelogy_tresh$date)
+mhws <- Detrend_MHW_days_to_MHWs(MHW_climatelogy_tresh,2,10,9,3,7)
+
+excel <- createWorkbook()
+addWorksheet(excel,sheetName = "MHW_Events")
+addWorksheet(excel,sheetName = "Climatelogy")
+writeData(excel,"MHW_Events",mhws)
+writeData(excel,"Climatelogy",MHW_climatelogy_tresh)
+saveWorkbook(excel,"Red Sea/MHWs_def/MHW_Amazia_Events_RedSea_Jacox.xlsx")#add description to name according to database used
+
+
+## Jacox moving baseline explanation
+# Extract coefficients
+coef_warming <- coef(warming_lm)
+slope <- slope <- formatC(coef_warming[2], format = "e", digits = 2)  # Scientific notation
+intercept <- round(coef_warming[1], 3)  # Round intercept for readability
+
+# Create the equation text
+equation_text <- paste0("y = ", intercept, " + ", slope, "x")
+
+
+# Aggregate data to monthly means
+MHW_monthly <- MHW_climatelogy_tresh %>%
+  group_by(year = format(date, "%Y"), month = format(date, "%m")) %>%
+  summarize(date = as.Date(paste(year, month, "15", sep = "-")),  # Mid-month,
+            seas=mean(seas),
+            temp=mean(temp),
+            anomaly_threshold=mean(anomaly_thresh),
+            anomaly = mean(anomaly, na.rm = TRUE),
+            residuals = mean(anomaly_detrend, na.rm = TRUE)) %>%
+  ungroup()
+
+# Plot with smoother monthly trends
+ggplot(MHW_monthly, aes(y=temp,x = date)) +
+  geom_line(aes(color = "Temp"), size = 1.8, alpha = 0.8) +
+  # geom_smooth(method = "lm", color = "red", se = TRUE) +  # Linear model with confidence interval
+  geom_line(aes(y = seas,color = "Climatology"), size = 1.8, alpha = 0.8) +
+  scale_color_manual(values = c("Temp"="black","Climatology"="blue"))+
+  theme_minimal()+
+  labs(x = "Date",
+       y = "Temp",
+       color = "Series") +
+  theme_minimal()
+
+# Plot Anomalies
+ggplot(MHW_monthly, aes(x = date, y = anomaly)) +
+  geom_line(aes(color = "Anomaly"), size = 0.3) +  # Plot the 'anomaly' data in black
+  # geom_line(aes(y = residuals, color = "Anomaly_detrended"), size = 0.3) +  # Plot 'residuals' data in blue
+  geom_line(aes(y = anomaly_threshold, color = "MHW_threshold"),linetype = "dotted",size =1.2) +  # Plot 'anomaly_threshold' data in red
+  scale_x_date(limits = as.Date(c("2010-01-01", NA))) +  # Limit x-axis to dates starting from 2010
+  scale_color_manual(values = c("MHW_threshold" = "red", "Anomaly" = "black", "Anomaly_detrended" = "blue")) +  # Custom colors for the lines
+  labs(x = "Date", y = "SST Anomaly") +
+  theme_minimal()
+
+
+```
+
+
+
+
+
+
+## Moving Median detending
+```{r}
+############### Red Sea #################
+red_ts <- ts(OISST_data_red$temp,frequency = 365,start = c(1981,365))
+red_mm.ts <- rollmedian(red_ts,93,fill=NA)
+red_mm_df <- data.frame(date=OISST_data_red$t,
+                    Origin=red_ts,
+                    mm=red_mm.ts)
+#remove start and end dates without values due to moving median
+red_mm_df <- na.omit(red_mm_df)
+red_mm_df$subtract <- red_mm_df$Origin - red_mm_df$mm
+red_mm_df$doy <- yday(red_mm_df$date)
+red_doy_thresh <- red_mm_df %>% 
+  select(doy,subtract) %>%
+  group_by(doy) %>% 
+  summarise("doy_t" = quantile(subtract,0.9,na.rm = T))
+red_mm_df <- merge(red_mm_df,red_doy_thresh,by = "doy")
+red_mm_df <- red_mm_df %>% arrange(date)
+red_mm_df$MHW_d <- ifelse(red_mm_df$subtract>red_mm_df$doy_t,T,F)
+
+#see difference between temp and moving median value
+ggplot(red_mm_df,aes(x=date))+
+  geom_point(aes(y=Origin),color ="blue")+
+  geom_point(aes(y=mm),color ="red")+
+  labs(x="Date",
+       y="Temp")
+
+#see difference between Moving median anomaly and threshold
+ggplot()+
+  geom_point(aes(x=red_mm_df$date,red_mm_df$subtract),color = "blue",size =0.4)+
+  geom_point(aes(x=red_mm_df$date,red_mm_df$doy_t),size =0.5)+
+  xlab("Date")+
+  ylab("Anomaly")
+
+#see thresholds in celsius of each day doy
+ggplot(red_doy_thresh)+
+  geom_point(aes(x=doy,y = doy_t))+
+  labs(x="Day of year",
+       y="MHW treshold celsius(quantile 90%)")
+
+# mediterranean
+# ggplot(med_doy_thresh)+
+#   geom_point(aes(x=doy,y = doy_t))+
+#   labs(x="Day of year",
+#        y="MHW treshold (quantile 90%)")
+mhws_31 <- Detrend_MHW_days_to_MHWs(red_mm_df,date_col_num = 2,MHW_day_col_num = 7,residuals_col_num = 5,origin_col_num = 3,threshold_col_num = 6)
+hist(mhws$intensity_mean)
+
+
+######## Mediterranean ############
+med_sst_long_1 <- med_sst_long %>% filter(lat == med_sst_long$lat[1] & lon == med_sst_long$lon[1])
+med_ts <- ts(med_sst_long_1$sst,frequency = 365,start = c(1981,237)) 
+med_mm.ts <- rollmedian(med_ts,93,fill=NA)
+med_mm_df <- data.frame(date=med_sst_long_1$date,
+                    Origin=med_ts,
+                    mm=med_mm.ts)
+med_mm_df <- na.omit(med_mm_df)
+med_mm_df$subtract <- med_mm_df$Origin - med_mm_df$mm
+med_mm_df$doy <- yday(med_mm_df$date)
+med_doy_thresh <- med_mm_df %>% 
+  select(doy,subtract) %>%
+  group_by(doy) %>% 
+  summarise("doy_t" = quantile(subtract,0.9,na.rm = T))
+med_mm_df <- merge(med_mm_df,med_doy_thresh,by = "doy")
+med_mm_df <- med_mm_df %>% arrange(date)
+med_mm_df$MHW_d <- ifelse(med_mm_df$subtract>med_mm_df$doy_t,T,F)
+
+
+excel <- createWorkbook()
+addWorksheet(excel,sheetName = "MHW_Events")
+addWorksheet(excel,sheetName = "Climatelogy")
+writeData(excel,"MHW_Events",mhws_31)
+writeData(excel,"Climatelogy",red_mm_df)
+saveWorkbook(excel,"Red Sea/Eilat 2017 MHW/MHWs/MHW__detrend_93mm_OISST_Events_RedSea1.xlsx")
+```
+
+
+
+## Analyze Eilat Linear De-trended Coper & IUI
+```{r}
+##Coper
+red_sst_long <- red_sst_long %>% filter(lat == red_sst_long$lat[1] &lon == red_sst_long$lon[1])
+red_sst_long$num_date <- as.numeric(red_sst_long$date)
+sst_date_Cop <- ggplot(red_sst_long,aes(x=date,y=sst))+
+  geom_point()+
+  scale_x_datetime(breaks = "5 year")
+warming_lm <- lm(sst~num_date,red_sst_long)
+summary(warming_lm)
+sjPlot::plot_model(warming_lm,type = 'eff',show.data = T)
+sjPlot::plot_model(warming_lm,type = 'diag',show.data = T)
+
+warming_lm_gg <- ggeffects::ggpredict(warming_lm,terms = "num_date[all]")
+warming_lm_gg <- cbind(warming_lm_gg,red_sst_long$date)
+warming_lm_gg <- cbind(warming_lm_gg,warming_lm$residuals)
+colnames(warming_lm_gg)[7:8] <- c("date","residuals")
+reisduals_date_Cop <- ggplot(warming_lm_gg,aes(x=date,y=residuals))+
+  geom_point()+
+  scale_x_datetime(breaks = "5 year")
+ggsave(reisduals_date_Cop,"reisduals_date_Cop.png")
+hist(warming_lm_gg$residuals)
+MHW_thrs <- quantile(warming_lm_gg$residuals,0.9)
+warming_lm_gg$MHW_day <- ifelse(warming_lm_gg$residuals>MHW_thrs,T,F)
+print(paste("Number of MHW days:", sum(warming_lm_gg$MHW_day==T)))
+de_MHW_cop <- Detrend_MHW_days_to_MHWs(warming_lm_gg,7,9,8)
+de_MHW_cop$date_start <- as.POSIXct(de_MHW_cop$date_start,origin="1970-01-01")
+de_MHW_cop$date_end <- as.POSIXct(de_MHW_cop$date_end,origin="1970-01-01")
+de_MHW_cop$date_max <- as.POSIXct(de_MHW_cop$date_max,origin="1970-01-01")
+
+
+##IUI
+sst_IUI_web <- na.omit(sst_IUI_web)
+sst_IUI_web$Date <- dmy(sst_IUI_web$Date)
+sst_IUI_web$num_date <- as.numeric(sst_IUI_web$Date)
+sst_date_IUI <- ggplot(sst_IUI_web,aes(x=Date,y=Temp))+
+  geom_point()+
+  scale_x_date(breaks = "3 years")
+warming_lm_IUI <- lm(Temp~num_date,sst_IUI_web)
+summary(warming_lm_IUI)
+sjPlot::plot_model(warming_lm_IUI,type = 'eff',show.data = T)
+sjPlot::plot_model(warming_lm_IUI,type = 'diag',show.data = T)
+
+warming_lm_IUI_gg <- ggeffects::ggpredict(warming_lm_IUI,terms = "num_date[all]")
+warming_lm_IUI_gg <- cbind(warming_lm_IUI_gg,sst_IUI_web$Date)
+warming_lm_IUI_gg <- cbind(warming_lm_IUI_gg,warming_lm_IUI$residuals)
+colnames(warming_lm_IUI_gg)[7:8] <- c("date","residuals")
+warming_lm_IUI_gg$date <- as.Date(warming_lm_IUI_gg$date)
+reisduals_date_IUI <- ggplot(warming_lm_IUI_gg,aes(x=date,y=residuals))+
+  geom_point()+
+  scale_x_date(breaks = "3 years")
+hist(warming_lm_IUI_gg$residuals)
+MHW_thrs_IUI <- quantile(warming_lm_IUI_gg$residuals,0.9)
+warming_lm_IUI_gg$MHW_day <- ifelse(warming_lm_IUI_gg$residuals>MHW_thrs_IUI,T,F)
+print(paste("Number of MHW days:", sum(warming_lm_IUI_gg$MHW_day==T)))
+de_MHW_IUI <- Detrend_MHW_days_to_MHWs(warming_lm_IUI_gg,7,9,8)
+de_MHW_IUI$date_start <- as.Date(de_MHW_IUI$date_start,origin="1970-01-01")
+de_MHW_IUI$date_end <- as.Date(de_MHW_IUI$date_end,origin="1970-01-01")
+de_MHW_IUI$date_max <- as.Date(de_MHW_IUI$date_max,origin="1970-01-01")
+
+
+```
+
+# Onset Rates
+```{r}
+onset_dataset <- OISST_data_red
+names(onset_dataset) <- c("date","temp")
+onset_dataset$year <- year(onset_dataset$date)
+onset_dataset$onset_rate <- NA
+for (day_i in 2:length(onset_dataset$date)) {
+    onset_dataset$onset_rate[day_i] <- onset_dataset$temp[day_i] - onset_dataset$temp[day_i-1] 
+}
+hist(onset_dataset$onset_rate)
+quantile(onset_dataset$onset_rate,0.99,na.rm = T)
+
+```
+
+# Graphs
+```{r}
+## Filtering the MHWs to short in the right period
+custom_colors <- c("#660000", "#800000", "#990000", "#b30000", "#cc3300", "#e64d00", "#ff8000", "#ffd700")
+custom_colors <- rev(custom_colors)
+MHW_events_plot_data <- read.xlsx("Red Sea/MHWs_def/MHW_OISST_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed") #MHW_OISST_Events_RedSea_Fix
+MHW_events_plot_data <- MHW_events_plot_data %>%
+  select(-reliabaility.level) %>%
+  filter(number.of.fish>0)
+MHW_events_plot_data$date_start <- as.Date(MHW_events_plot_data$date_start,origin = "1899-12-30")
+ggplot(MHW_events_plot_data, aes(x = date_start, y = intensity_max)) +
+  geom_lolli(size=2,aes(color = duration)) +
+  scale_color_gradientn(colors = custom_colors,name = "Duration \n[Days]")+
+  labs(y = expression(paste("Max. intensity [", degree, "C]")), x = NULL) + 
+  scale_x_date(breaks = "4 months",date_labels = "%m-%Y")+
+  theme_bw()+
+  theme(
+    axis.title.x = element_text(size = 16),  # Change size of x-axis title
+    axis.title.y = element_text(size = 14),  # Change size of y-axis title
+    axis.text.x = element_text(size = 14),    # Change size of x-axis text
+    axis.text.y = element_text(size = 14),    # Change size of y-axis text
+    legend.title = element_text(size = 12),    # Change size of legend title
+    legend.text = element_text(size = 12)      # Change size of legend text
+  )
+
+ggplot(MHW_events_plot_data, aes(x = date_start, y = duration)) +
+  # geom_lolli(size=2,aes(color = intensity_max)) +
+  scale_color_gradientn(colors = custom_colors,name = "Max. intensity [C]")+
+  labs(x = "Date", 
+       y = expression(paste("Duration [Days]")), x = NULL) + 
+  scale_x_date(breaks = "4 months",date_labels = "%m-%Y")+
+  theme_bw()
+  
+
+
+```
+## Fixed baseline explanation
+```{r}
+## Fixed baseline graphs
+# Filter data: keep temp for all years but seas and thresh only after 2011
+plot_data <- MHW_climatelogy_tresh %>%
+  mutate(seas = ifelse(t >= as.Date("2012-01-01"), seas, NA),
+         thresh = ifelse(t >= as.Date("2012-01-01"), thresh, NA))
+# Plot
+ggplot(plot_data, aes(x = t)) +
+  # # Grey rectangle for baseline period (1982-2011)
+  # annotate("rect", xmin = as.Date("1982-01-01"), xmax = as.Date("2011-12-31"),
+  #          ymin = -Inf, ymax = Inf, fill = "gray23", alpha = 0.2) +
+  # 
+  # # Baseline period label
+  # annotate("text", x = as.Date("1995-01-01"), y = max(plot_data$temp, na.rm = TRUE) + 0.5,
+  #          label = "Baseline Period", color = "black", size = 5) +
+
+  # Temperature line (black) - all years
+  geom_line(aes(y = temp, color = "Temperature"), size = 1) +
+
+  # Threshold (red) - only after 2011
+  geom_line(aes(y = thresh, color = "Threshold"), size = 1) +
+
+  # Climatology (blue) - only after 2011
+  geom_line(aes(y = seas, color = "Climatology"), size = 1) +
+
+  # X-axis: Breaks every 5 years
+  scale_x_date( breaks = seq(as.Date("2016-01-01"), as.Date("2021-12-31"), by = "1 years"), date_labels = "%Y") +
+
+  # Labels and theme
+  labs(x = "Time", y = "Temperature (°C)", color = "Legend") +
+  
+  # Customize the legend colors
+  scale_color_manual(
+    values = c("Temperature" = "black", "Threshold" = "red", "Climatology" = "blue")
+  ) +
+  theme_minimal() +
+   # Set the x-axis limit starting from 1/1/2016
+  xlim(as.Date("2016-01-01"), as.Date("2021-12-31")) +
+  theme(legend.position = "top",
+        legend.title = element_blank())
+
+```

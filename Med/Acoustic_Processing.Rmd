@@ -1,0 +1,197 @@
+---
+title: "Acoustic_Processing"
+author: "Dan Bez Golanski"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+## Load packages
+```{r warning=FALSE}
+library(lubridate)
+library(tidyverse)
+library(openxlsx)
+library(ggplot2)
+library(scales)
+
+
+```
+
+## Functions
+```{r}
+formatting.new.tag.data <- function(tags_df,company) {
+  if(company == "tb")
+  {
+    # Rename columns
+    names(tags_df) <- c("DateTime_UTC", "Unix_Timestamp_UTC", "ID", "Data",
+                        "Protocol", "SNR", "Receiver")
+  
+    # Convert DateTime_UTC to POSIXct
+    tags_df$DateTime_UTC <- as.POSIXct(tags_df$DateTime_UTC,
+                                       format="%Y-%m-%dT%H:%M:%OSZ", tz="UTC")
+
+    # Convert Unix Timestamp and create new columns
+    tags_df <- tags_df %>%
+      mutate(
+        Date_UTC = as.Date(as.POSIXct(Unix_Timestamp_UTC, origin="1970-01-01",
+                                      tz="UTC")),
+        Time_UTC = format(as.POSIXct(Unix_Timestamp_UTC, origin="1970-01-01",
+                                     tz="UTC"), "%H:%M:%S"),
+      
+        # Convert DateTime_UTC to Israel Time
+        DateTime_Israel = with_tz(DateTime_UTC, "Asia/Jerusalem"),
+      
+        # Extract separate Date and Time for Israel timezone
+        Date_Israel = as.Date(DateTime_Israel),
+        Time_Israel = format(DateTime_Israel, "%H:%M:%S"),
+        Company = "tb"
+      ) %>%
+  
+      # Reorder columns: keep existing ones, then add new ones after Unix_Timestamp_UTC
+      select(DateTime_UTC, Unix_Timestamp_UTC, Date_UTC, Time_UTC,
+             DateTime_Israel, Date_Israel, Time_Israel, everything())
+  
+  } 
+  else ## Vemco files
+  {
+    tags_df <- tags_df %>%
+      select(Date.and.Time..UTC.,Receiver,Transmitter,Sensor.Value)
+    # Rename columns
+    names(tags_df) <- c("DateTime_UTC","Receiver","ID", "Data")
+    ## Cut last two characters
+    tags_df$ID <- substr(tags_df$ID,nchar(tags_df$ID)-1,nchar(tags_df$ID)) 
+    # Convert DateTime_UTC to POSIXct
+    tags_df$DateTime_UTC <- as.POSIXct(tags_df$DateTime_UTC,tz = "UTC")
+                                       
+    # Convert Unix Timestamp and create new columns
+    tags_df <- tags_df %>%
+      mutate(
+        Date_UTC = as.Date(DateTime_UTC),
+        Time_UTC = format(DateTime_UTC, "%H:%M:%S"),
+      
+        # Convert DateTime_UTC to Israel Time
+        DateTime_Israel = with_tz(DateTime_UTC, "Asia/Jerusalem"),
+      
+        # Extract separate Date and Time for Israel timezone
+        Date_Israel = as.Date(DateTime_Israel),
+        Time_Israel = format(DateTime_Israel, "%H:%M:%S"),
+        Company = "Innovasea"
+      ) %>%
+  
+      # Reorder columns
+      select(DateTime_UTC, Date_UTC, Time_UTC,
+             DateTime_Israel, Date_Israel, Time_Israel, everything())
+    }
+  
+  return(tags_df)
+}
+
+Convert_sensor_data <- function(tags_df, tags_metadata,company){
+  
+  # Create a new column 'acc' in tags_df and initialize it with NA values
+  tags_df$acc <- NA
+  acc_tags <- tags_metadata$tag[tags_metadata$tag_type=="A"]
+  # Loop through each unique 'tag' in tags_metadata
+  for (id in acc_tags) {
+    if(company=="tb")
+    {
+    # For each 'id' (tag), calculate the acceleration ('acc') and update the corresponding rows in tags_df
+    # This uses the formula: acc = (Data * slope) + intercept
+    # 'Data' is the sensor data in tags_df, 'slope' and 'intercept' are parameters from tags_metadata
+    tags_df$acc[tags_df$ID == id] <- tags_df$Data[tags_df$ID == id] *
+      tags_metadata$slope[tags_metadata$tag == id] + 
+      tags_metadata$intercept[tags_metadata$tag == id]  
+    }
+    else # Innovasea
+    {
+      # For each 'id' (tag), calculate the acceleration ('acc') and update the corresponding rows in tags_df
+    # This uses the formula: acc = (Data * slope) + intercept
+    # 'Data' is the sensor data in tags_df, 'slope' and 'intercept' are parameters from tags_metadata
+    tags_df$acc[tags_df$ID == id] <-
+      tags_df$Data[tags_df$ID == id] *
+      tags_metadata$slope[tags_metadata$tag ==id] +                                     tags_metadata$intercept[tags_metadata$tag == id]
+    }
+    
+    
+  }
+  
+  # Return the updated tags_df with the new 'acc' column
+  return(tags_df)
+}
+
+Plot_new_data <- function(tags_df, plot_breaks) {
+  # Ensure 'ID' and 'Receiver' are factors to make sure the facets are plotted properly
+  tags_df$ID <- as.factor(tags_df$ID)
+  tags_df$Receiver <- as.factor(tags_df$Receiver)
+  
+  # Create the plot with facets for each 'ID' and 'Receiver'
+  p <- ggplot(tags_df, aes(x = DateTime_Israel, y = acc, color = ID)) + 
+    geom_point() + 
+    facet_wrap(~ ID + Receiver, scales = "free") +  # Facet by both 'ID' and 'Receiver'
+    labs(title = "Time Series of Acceleration by Receiver and ID",
+         x = "Time", 
+         y = "Acceleration") +
+    scale_x_datetime(breaks = plot_breaks, labels = date_format("%d/%m/%y %H:%M:%S")) +  # Format time axis
+    theme_minimal() +
+    theme(legend.position = "none",  # Hide legend if it's not needed
+          axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels
+  
+  # Print the combined plot
+  print(p)
+}
+
+read_new_file <- function()
+{
+start_bool <- readline("Do you want to read new datafile? y/n")
+if(start_bool=="y")
+{
+  new_data_filename <- readline("Please enter the new data file name:")    
+  waterTable_bool <- readline("Is it from the water table? y/n")    
+  if(waterTable_bool=="y")
+  {
+  new_tags_data <-read.csv(paste0("../../../Mediterranean/Acoustic Data/Post-Surgeries WaterTable/",new_data_filename))    
+  } 
+  else
+  {
+  new_tags_data <-read.csv(paste0("../../../Mediterranean/Acoustic Data/Field data/",new_data_filename))
+  }
+  return(new_tags_data)
+}
+return(NA)
+  
+}
+```
+
+
+## Load data 
+```{r}
+tags_metadata <- read.xlsx("../../../Mediterranean/Tags/Tags_fish_db.xlsx")
+
+new_tags_data <- read_new_file()
+field_tags_data <-readRDS("../../../Mediterranean/Acoustic Data/Field data/playground_acoustic_data.rds")
+waterTable_tags_data <-readRDS("../../../Mediterranean/Acoustic Data/Post-Surgeries WaterTable/waterTable_acoustic_data.rds")
+
+```
+
+## Formatting new data
+```{r}
+new_tags_data <- formatting.new.tag.data(new_tags_data,company = "vemco")
+new_tags_data <- Convert_sensor_data(new_tags_data,tags_metadata,company = "vemco")
+Plot_new_data(new_tags_data,"6 hours")
+
+#Calculate detection rate in water table
+for (id in unique(new_tags_data$ID)) {
+  print(id)
+  min_datetime <- min(new_tags_data$DateTime_Israel[new_tags_data$ID==id])
+  print(min_datetime)
+  max_datetime <- max(new_tags_data$DateTime_Israel[new_tags_data$ID==id])
+  print(max_datetime)
+  difftime_id <-  as.numeric(difftime(max_datetime,min_datetime,units = "mins"))
+  expect_dec <- difftime_id/3
+  print(expect_dec)
+  real_dec <- length(new_tags_data$Data[new_tags_data$ID==id])
+  print(real_dec)
+  print(paste("detection ratio:",real_dec/expect_dec))
+}
+```
+
+

@@ -5,35 +5,63 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
-##packages
+## Packages
 ```{r}
 library(tidyverse)
 library(openxlsx)
+library(stringr) # for filterting non english
 library(lubridate)
 library(reshape2)
+library(vegan)
+library(betapart)
+library(plotrix)
+library(ggfortify)
+library(rareNMtests)
+library(mobr)
+library(cooccur)
+library(patchwork)
+library(rfishbase)
 ```
 
-##Load Data 
+## Functions
+```{r}
+contains_non_english <- function(text) {
+  if (str_detect(text, "[^[:ascii:]]")) {
+    return(TRUE)
+  } else {
+    return(FALSE)
+  }
+}
+```
+
+## Load Data 
 ```{r}
 trawl_metadata <- read.xlsx("Med/Community Ecology/Isr_Trawls.xlsx",sheet = "Stats & Metadata")
-trawl_raw <- read.xlsx("Med/Isr_Trawls.xlsx",sheet = "Raw Samples and lengths")
+trawl_raw <- read.xlsx("Med/Community Ecology/Isr_Trawls.xlsx",sheet = "Raw Samples and lengths")
 trawl_metadata$Date <- lubridate::dmy(trawl_metadata$Date)
 trawl_metadata$Date[7:8] <- "1990-09-30"
 trawl_metadata$Date <- as.Date(trawl_metadata$Date)
-MHW_metadata <- read.csv("Med/Community Ecology/MHW_Events_ISR_mean.csv")
+MHW_metadata <- read.xlsx("Med/Community Ecology/MHW_Isr_mean_territorial_waters.xlsx",sheet = "MHW_Isr_mean_terr_assos")
+MHW_metadata <- MHW_metadata[1:27,]
 trawl_wide <- readRDS("Med/Community Ecology/Trawl_wide_format.RDS")
+relevent_trawls <- readRDS("Med/Community Ecology/Com_Eco_MHW_Trawl_basic.RDS")
+relevent_trawls_depths <- readRDS("Med/Community Ecology/Com_Eco_MHW_Trawl_Analysis.RDS")
+
 ```
 
-##Change trawls to wide 
+## Change trawls to wide 
 ```{r}
 trawl_raw <- trawl_raw[,c(1:9,147)]
-names(trawl_raw) <- c("Period","Serial","Season","North_south","Depth_group","Night_day","Net_Type","Species","total")
+names(trawl_raw) <- c("Period","Serial","Season","North_south","Depth_group","Night_day","Net_Type","Haul","Species","total")
+trawl_raw <- trawl_raw %>% filter(Net_Type == "Fish")
+trawl_raw <- trawl_raw[!sapply(trawl_raw$Species, contains_non_english), ]
 trawl_wide_format <- dcast(trawl_raw,Serial+Period+North_south+Night_day+Season+Depth_group+Net_Type~Species,value.var="total",sum)
 saveRDS(trawl_wide_format,"Trawl_wide_format.RDS")
 ```
 
 
-##Associate MHW and trawls - not working good!
+
+## Associate MHW and trawls - not working good!
 ```{r}
 trawls_year <- c(1990:1994,2000,2008:2012)
 names(MHW_metadata)[1] <- "Serial"
@@ -65,9 +93,9 @@ write.csv(MHW_Trawl_asscosiation,"MHW_trawl_associate.csv")
 
 ```
 
-##Filter relevent trawls & associate with MHW
+## Filter relevent trawls & associate with MHW
 ```{r}
-MHW_Trawl_asscosiation <- read.csv("Med/Community Ecology/MHW_trawl_associate.csv")
+MHW_Trawl_asscosiation <- read.xlsx("Med/Community Ecology/MHW_Isr_mean_territorial_waters.xlsx",sheet = "MHW_Isr_mean_terr_assos")
 #get the trawls number before and after separated and in new lists - before and after
 MHW_Trawl_asscosiation$before_Haul <- MHW_Trawl_asscosiation$before_Haul %>% strsplit(", ")
 MHW_Trawl_asscosiation$After_Haul <- MHW_Trawl_asscosiation$After_Haul %>% strsplit(", ")
@@ -112,7 +140,7 @@ relevent_trawls <- rbind(relevent_trawls_before_temp,relevent_trawls_after_temp)
 rm(relevent_trawls_after_temp,relevent_trawls_before_temp)
 ```
 
-##Get trawls metadata
+## Get trawls metadata
 ```{r}
 ##getting depth, area and trawl time
 for (trawl_num in 1:dim(relevent_trawls)[1]) {
@@ -123,24 +151,911 @@ for (trawl_num in 1:dim(relevent_trawls)[1]) {
     relevent_trawls$Trawl.time[trawl_num] <- 
       trawl_metadata$`Haul.Time.(hrs)`[relevent_trawls$Serial[trawl_num]==trawl_metadata$Serial]  
 }
-
+relevent_trawls$Period_Bef.Aft <- paste(relevent_trawls$Period,relevent_trawls$Before.after)
 relevent_trawls <- relevent_trawls %>% relocate(Mean.Depth,.before = Depth_group)
 relevent_trawls <- relevent_trawls %>% relocate(Area,.after = MHW_ID)
 relevent_trawls <- relevent_trawls %>% relocate(Trawl.time,.after = Depth_group)
-saveRDS(relevent_trawls,"Com_Eco_MHW_Trawl_basic.RDS")
+relevent_trawls <- relevent_trawls %>% relocate(Period_Bef.Aft,.after = Before.after)
+
+saveRDS(relevent_trawls,"Med/Community Ecology/Com_Eco_MHW_Trawl_basic.RDS")
 ```
 
-##Analyze data
+## Taking account Depth groups and filter by them
+```{r}
+relevent_trawls_depths <- data.frame()
+for (mhw in unique(relevent_trawls$MHW_ID)) {
+  temp_mhw <- relevent_trawls %>% filter(MHW_ID==mhw)
+  dep_groups_bef <- unique(temp_mhw$Depth_group[temp_mhw$Before.after=="Before"])
+  dep_groups_aft <- unique(temp_mhw$Depth_group[temp_mhw$Before.after=="After"])
+  temp_mhw <- temp_mhw %>% filter((Depth_group %in% dep_groups_bef)&(Depth_group %in% dep_groups_aft))
+  relevent_trawls_depths <- rbind(relevent_trawls_depths,temp_mhw)
+}
+```
+
+
+## Filter only the fish certain species
+```{r}
+fish_base <- species(colnames(relevent_trawls_depths)[14:ncol(relevent_trawls_depths)])
+sealifeB <- species(colnames(relevent_trawls_depths)[14:ncol(relevent_trawls_depths)],server = "sealifebase")
+relevent_trawls_depths_1 <- relevent_trawls_depths # just for backup
+relevent_trawls_depths <- relevent_trawls_depths %>% select(c(1:13),fish_base$Species)
+```
+
+## Calcuate invasive species
+```{r}
+species_table <-read.xlsx("Med/Community Ecology/Isr_Trawls.xlsx",sheet = "Species table") 
+species_table <- species_table %>% filter(Origin=="Invasive")
+species_table <- species_table$Species
+relevent_trawls_T1 <- relevent_trawls_depths %>% filter(Period=="1990-4")
+relevent_trawls_T1 <- relevent_trawls_T1[,first_spe_col:ncol(relevent_trawls_T1)]
+relevent_trawls_T1 <-  relevent_trawls_T1[, colSums(relevent_trawls_T1 != 0) > 0]#42
+T1_inv <-  colnames(relevent_trawls_T1)[colnames(relevent_trawls_T1) %in% species_table]
+relevent_trawls_T2 <- relevent_trawls_depths %>% filter(Period=="2008-12")
+relevent_trawls_T2 <- relevent_trawls_T2[,first_spe_col:ncol(relevent_trawls_T2)]
+relevent_trawls_T2 <-  relevent_trawls_T2[, colSums(relevent_trawls_T2 != 0) > 0]#88
+T2_inv <-  colnames(relevent_trawls_T2)[colnames(relevent_trawls_T2) %in% species_table]
+
+
+```
+
+## Calculate simple metrics
 ```{r}
 #calculate species richness
-relevent_trawls <- relevent_trawls %>% rowwise() %>% 
-  mutate(total_sp_number= sum(c_across(13:309) > 0, na.rm = TRUE))
+relevent_trawls_depths <- relevent_trawls_depths %>% rowwise() %>% 
+  mutate(total_sp_number= sum(c_across(14:ncol(relevent_trawls_depths)) > 0, na.rm = TRUE))
 #calculate individual number
-relevent_trawls <- relevent_trawls %>% rowwise() %>% 
-  mutate(total_ind_number= sum(c_across(13:309), na.rm = TRUE))
-relevent_trawls <- relevent_trawls %>% relocate(total_sp_number,.after = Net_Type)
-relevent_trawls <- relevent_trawls %>% relocate(total_ind_number,.after = total_sp_number)
-saveRDS(relevent_trawls,"Com_Eco_MHW_Trawl_Analysis.RDS")
+relevent_trawls_depths <- relevent_trawls_depths %>% rowwise() %>% 
+  mutate(total_ind_number= sum(c_across(14:ncol(relevent_trawls_depths)), na.rm = TRUE))
+relevent_trawls_depths <- relevent_trawls_depths %>% relocate(total_sp_number,.after = Net_Type)
+relevent_trawls_depths <- relevent_trawls_depths %>% relocate(total_ind_number,.after = total_sp_number)
+saveRDS(relevent_trawls_depths,"Med/Community Ecology/Com_Eco_MHW_Trawl_Analysis.RDS")
+```
+
+
+## Calculate hill profile
+```{r}
+##all data
+first_spe_col <- 16
+sp_matrix <- relevent_trawls_depths[,first_spe_col:ncol(relevent_trawls_depths)]
+renyi_profile <- renyi(sp_matrix,  
+                       scales = c(0, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 2, 4, 8, 16, 32, 64, Inf),
+                       hill = T)
+meta_data <- relevent_trawls_depths[,1:first_spe_col-1]
+renyi_df<-bind_cols(meta_data,renyi_profile)
+renyi_df<-gather(renyi_df,"Q","Value",first_spe_col:ncol(renyi_df))
+renyi_df<-renyi_df %>% arrange(MHW_ID,Serial)
+renyi_df$Q <- as.numeric(renyi_df$Q)
+color_palette <- c("#E41A1C", "#4DAF4A")
+
+ggplot( data = renyi_df ) +
+  aes(x = Q, y = Value, group = Serial , color = Period)+
+  geom_line(size = 1,aes(color=Period))+
+  scale_color_manual(values = color_palette)+
+  geom_point()+
+  scale_x_continuous(limits = c(0,64))+
+  theme_bw()
+
+#for each period by itself and see differences
+ggplot(renyi_df) +
+  aes(x = Q, y = Value, group = Serial , color = Before.after)+
+  geom_line() +
+  geom_point()+
+  scale_x_continuous(limits = c(0,64))  +
+  facet_wrap(.~Period)
+
+
+#summed for the different periods and before after
+group_Before.after_period_data <- relevent_trawls_depths %>% 
+  select(Period,Period_Bef.Aft,Before.after,first_spe_col:ncol(relevent_trawls_depths)) %>% 
+  group_by(Period_Bef.Aft,Period,Before.after) %>% # use this unit for analyses
+  summarise(across(.fns = sum),.groups = "keep") #summarize all other values by summing all the rows in each group.
+renyi_group_profile <- renyi(group_Before.after_period_data[,-1:-3],  
+                       scales = c(0, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 2, 4, 8, 16, 32, 64, Inf),
+                       hill = T)
+renyi_group_df<-bind_cols(group_Before.after_period_data[,1:3],renyi_group_profile)
+renyi_group_df<-gather(renyi_group_df,"Q","Value",4:ncol(renyi_group_df))
+renyi_group_df$Q <- as.numeric(renyi_group_df$Q)
+ggplot( data = renyi_group_df ) +
+  aes(x = Q, y = Value)+
+  geom_line(size=1,aes(color=Period,linetype=Before.after))+
+  scale_linetype_manual(values=c("dashed","solid"))+
+  scale_color_manual(values = color_palette)+
+  # geom_point()+
+  scale_x_continuous(limits = c(0,5),breaks = seq(1,4,1))+
+  xlab("Senetivity parameter q")+
+  ylab("Diversity (Hill number)")+
+  # facet_wrap(~Period,scales= "free_y")+
+  theme_bw()
+
+#summed for the only Before.after
+group_Before.after_data <- relevent_trawls_depths %>% 
+  select(Before.after,first_spe_col:ncol(relevent_trawls_depths)) %>% 
+  group_by(Before.after) %>% # use this unit for analyses
+  summarise(across(.fns = sum),.groups = "keep") #summarize all other values by summing all the rows in each group.
+renyi_group_profile <- renyi(group_Before.after_data[,-1],  
+                       scales = c(0, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 2, 4, 8, 16, 32, 64, Inf),
+                       hill = T)
+renyi_group_df<-bind_cols(group_Before.after_data[,1],renyi_group_profile)
+renyi_group_df<-gather(renyi_group_df,"Q","Value",2:ncol(renyi_group_df))
+renyi_group_df$Q <- as.numeric(renyi_group_df$Q)
+
+ggplot( data = renyi_group_df ) +
+  aes(x = Q, y = Value, group = Before.after , color = Before.after)+
+  geom_line(size = 1)+
+  geom_point()+
+  scale_x_continuous(limits = c(0,7))+
+  theme_bw()
+
+```
+
+## Calculate bray curtis betadiversity
+```{r}
+
+#beta diversity between different periods
+bray_scores_depth_group<-list() # create an empty list to store my newly created data
+for (i in unique(relevent_trawls_depths$Period)){
+  
+period_data <- relevent_trawls_depths %>% filter(Period == i) # keep only the observation of sample i
+
+period_sp_matrix <- period_data[,(first_spe_col+1):ncol(period_data)] # create species matrix
+
+period_bray_part <- bray.part(period_sp_matrix) # apply the function that calculate bray Curtis distances 
+period_bray_results<- period_bray_part[[3]] # keep only the bray Curtis results
+
+period_bray_results<-as.numeric(period_bray_results) # convert to numeric object
+
+mean_bray <- mean(period_bray_results) # calculate the mean bray curtis distance
+se_bray <- std.error(period_bray_results)# calculate SE
+Sample <- i # argument with the the name of the site
+
+bray_data <- data.frame(Sample,mean_bray,se_bray) # create data frame that save those variables 
+
+bray_scores_depth_group[[i]]<-bray_data # save it in my list
+  
+}
+bray_scores_depth_group<-bind_rows(bray_scores_depth_group) # convert from list to data frame
+bray_scores_depth_group$Sample <- factor(bray_scores_depth_group$Sample,levels = 
+                                           unique(relevent_trawls_depths$Period),
+                                         ordered = T)
+ggplot(bray_scores_depth_group,aes(x = Sample,
+                       y = mean_bray,
+                       color = Sample)) +
+  geom_point(size = 4)+
+  geom_errorbar(aes(ymin= mean_bray - se_bray,
+                    ymax= mean_bray + se_bray),size =1.2,width = 0.2)
+
+#beta diversity between before and  after
+bray_scores_depth_group<-list() # create an empty list to store my newly created data
+for (i in unique(relevent_trawls_depths$Before.after)){
+  
+period_data <- relevent_trawls_depths %>% filter(Before.after == i) # keep only the observation of sample i
+
+period_sp_matrix <- period_data[,(first_spe_col+1):ncol(period_data)] # create species matrix
+
+period_bray_part <- bray.part(period_sp_matrix) # apply the function that calculate bray Curtis distances 
+period_bray_results<- period_bray_part[[3]] # keep only the bray Curtis results
+
+period_bray_results<-as.numeric(period_bray_results) # convert to numeric object
+
+mean_bray <- mean(period_bray_results) # calculate the mean bray curtis distance
+se_bray <- std.error(period_bray_results)# calculate SE
+Sample <- i # argument with the the name of the site
+
+bray_data <- data.frame(Sample,mean_bray,se_bray) # create data frame that save those variables 
+
+bray_scores_depth_group[[i]]<-bray_data # save it in my list
+  
+}
+bray_scores_depth_group<-bind_rows(bray_scores_depth_group) # convert from list to data frame
+bray_scores_depth_group$Sample <- factor(bray_scores_depth_group$Sample,levels = 
+                                           unique(relevent_trawls_depths$Before.after),
+                                         ordered = T)
+ggplot(bray_scores_depth_group,aes(x = Sample,
+                       y = mean_bray,
+                       color = Sample)) +
+  geom_point(size = 4)+
+  geom_errorbar(aes(ymin= mean_bray - se_bray,
+                    ymax= mean_bray + se_bray),size =1.2,width = 0.2)
+
+
+
+
+#beta diversity between different periods and before.after
+bray_scores<-list() # create an empty list to store my newly created data
+for (i in unique(relevent_trawls_depths$Period_Bef.Aft)){
+  
+period_data <- relevent_trawls_depths %>% filter(Period_Bef.Aft ==i) # keep only the observation of sample i
+
+period_sp_matrix <- period_data[,first_spe_col:ncol(period_data)] # create species matrix
+
+period_bray_part <- bray.part(period_sp_matrix) # apply the function that calculate bray Curtis distances 
+period_bray_results<- period_bray_part[[3]] # keep only the bray Curtis results
+
+mean_bray <- mean(period_bray_results) # calculate the mean bray curtis distance
+se_bray <- std.error(period_bray_results)# calculate SE
+Sample <- i # argument with the the name of the site
+Period <- period_data$Period
+
+bray_data <- data.frame(Sample,Period,mean_bray,se_bray) # create data frame that save those variables 
+
+bray_scores[[i]]<-bray_data # save it in my list
+  
+}
+bray_scores<-bind_rows(bray_scores) # convert from list to data frame
+bray_scores$Sample <- factor(bray_scores$Sample,levels = c("1990-4 Before",
+                                         "1990-4 After",
+                                         "2000 Before",
+                                         "2000 After",
+                                         "2008-12 Before",
+                                         "2008-12 After"),ordered = T)
+beta_plot <- ggplot(bray_scores,aes(x = Sample,
+                       y = mean_bray,
+                       color = Period)) +
+  scale_color_manual(values=color_palette)+
+  geom_point(size = 4)+
+  geom_errorbar(aes(ymin= mean_bray - se_bray,
+                    ymax= mean_bray + se_bray),size =1.2,width = 0.2)+
+  theme_bw()+
+  theme(legend.position =  "none")+
+  xlab("Sampling Period Before/After")+
+  ylab("Bray curtis dissimilarity")+
+  ylim(0.5,0.9)
+
+
+#beta diversity between different periods and before.after - Log10 trans!!
+bray_scores<-list() # create an empty list to store my newly created data
+for (i in unique(relevent_trawls_depths$Period_Bef.Aft)){
+  
+period_data <- relevent_trawls_depths %>% filter(Period_Bef.Aft ==i) # keep only the observation of sample i
+
+period_sp_matrix <- period_data[,first_spe_col:ncol(period_data)] # create species matrix
+period_sp_matrix_log<-decostand(period_sp_matrix, method = 'log',logbase = 10)
+
+
+period_bray_part <- bray.part(period_sp_matrix_log) # apply the function that calculate bray Curtis distances 
+period_bray_results<- period_bray_part[[3]] # keep only the bray Curtis results
+
+mean_bray <- mean(period_bray_results) # calculate the mean bray curtis distance
+se_bray <- std.error(period_bray_results)# calculate SE
+Sample <- i # argument with the the name of the site
+Period <- period_data$Period
+
+bray_data <- data.frame(Sample,Period,mean_bray,se_bray) # create data frame that save those variables 
+
+bray_scores[[i]]<-bray_data # save it in my list
+  
+}
+bray_scores<-bind_rows(bray_scores) # convert from list to data frame
+bray_scores$Sample <- factor(bray_scores$Sample,levels = c("1990-4 Before",
+                                         "1990-4 After",
+                                         "2000 Before",
+                                         "2000 After",
+                                         "2008-12 Before",
+                                         "2008-12 After"),ordered = T)
+log10_beta_plot <- ggplot(bray_scores,aes(x = Sample,
+                       y = mean_bray,
+                       color = Period)) +
+  scale_color_manual(values=color_palette)+
+  geom_point(size = 4)+
+  geom_errorbar(aes(ymin= mean_bray - se_bray,
+                    ymax= mean_bray + se_bray),size =1.2,width = 0.2)+
+  theme_bw()+
+  xlab("Sampling Period Before/After")+
+  ylab("Bray curtis dissimilarity")+
+  ylim(0.5,0.9)
+beta_plot+log10_beta_plot
+
+
+```
+
+## Calcualte beta diversity components pairwise and multi-sites
+```{r}
+beta_pair_data<-list()
+
+for (i in unique(relevent_trawls_depths$Period_Bef.Aft)){
+  
+  period_data <- relevent_trawls_depths %>% filter(Period_Bef.Aft == i)
+  period_data_sp_matrix <- period_data[,first_spe_col:length(period_data)] # keep only species data  
+  
+  period_data_incidence <- period_data_sp_matrix %>%
+    replace(period_data_sp_matrix > 0, 1) # convert to presence-absence data
+  
+  period_beta_pairs <- beta.pair(period_data_incidence) # calculate the beta values
+  
+  period_beta_pairs <- bind_cols(period_beta_pairs) # tie the list element toghter
+
+  period_beta_pairs$Period_Bef.Aft <- rep(i) # add site
+  
+  period_beta_pairs <- as.data.frame(period_beta_pairs) # convert to data frame 
+  
+  period_beta_pairs$beta.sim<-as.numeric(period_beta_pairs$beta.sim) # change from distance object to numeric
+  period_beta_pairs$beta.sne<-as.numeric(period_beta_pairs$beta.sne)
+  period_beta_pairs$beta.sor<-as.numeric(period_beta_pairs$beta.sor)
+ 
+   beta_pair_data[[i]] <- period_beta_pairs # save to list
+  
+}
+
+beta_pair_data<-bind_rows(beta_pair_data) # convert list to data frame
+
+beta_pair_data<- gather(beta_pair_data,"component","beta",1:3) # long format
+
+beta_pair_data <- beta_pair_data %>%
+  filter(component != "beta.sor")  # filter beta.sor (sum of sim and sne) 
+
+beta_pair_data$Period_Bef.Aft <- factor(beta_pair_data$Period_Bef.Aft,levels = c("1990-4 Before",
+                                         "1990-4 After",
+                                         "2000 Before",
+                                         "2000 After",
+                                         "2008-12 Before",
+                                         "2008-12 After"),ordered = T)
+
+ggplot(beta_pair_data)+
+  aes(x=Period_Bef.Aft,y=beta,fill=component)+
+  stat_summary(geom = "bar",fun.data = mean_se)+
+  stat_summary(geom = "errorbar",fun.data = mean_se,width = 0.3)+
+  ylab(expression(paste(beta,"-diversity")))+
+  xlab("Sampling Period Before/After")+
+  theme_bw()
+
+
+#Multi site beta components
+summary_table<-relevent_trawls_depths %>% group_by(Period_Bef.Aft) %>% summarise("trawls"= n_distinct(Serial))
+least_sampled <- min(summary_table$trawls) 
+same_effort_beta_df <- relevent_trawls_depths
+same_effort_beta_df[first_spe_col:ncol(relevent_trawls_depths)] <- replace(same_effort_beta_df[first_spe_col:ncol(relevent_trawls_depths)], same_effort_beta_df[first_spe_col:ncol(relevent_trawls_depths)]>0, 1)
+same_effort_beta<-list()
+
+for (i in relevent_trawls_depths$Period_Bef.Aft) {
+  
+  one_period <- relevent_trawls_depths %>% filter(Period_Bef.Aft == i)
+  
+  one_period_sp_matrix <- one_period[,first_spe_col:ncol(one_period)]
+  one_period_data_incidence <- one_period_sp_matrix %>%
+    replace(one_period_sp_matrix > 0, 1) # convert to presence-absence data
+  
+  period_beta_sample <- beta.sample(one_period_data_incidence,
+            sites= least_sampled, 
+            samples = 100)
+  
+ 
+  period_beta_sample_data <- data.frame(mean = period_beta_sample[["mean.values"]],
+                                    se = period_beta_sample[["sd.values"]])
+
+  period_beta_sample_data <-rownames_to_column(period_beta_sample_data,'Component') 
+
+  period_beta_sample_data$Period_Bef.Aft <- i
+  
+ same_effort_beta[[i]]<-period_beta_sample_data
+  
+  
+}
+
+same_effort_beta<-bind_rows(same_effort_beta)
+
+same_effort_beta <- same_effort_beta %>%
+  filter(Component != "beta.SOR") 
+
+
+ggplot(same_effort_beta)+
+  aes(x=Period_Bef.Aft,y=mean,fill=Component)+
+  geom_bar(stat="identity",position = position_stack())+
+  # geom_errorbar(aes(ymin = SEPos - se, ymax = SEPos +se))+
+  ylab(expression(paste("beta-diversity")))+
+  theme_bw()
+
+
+```
+
+## Calculate richness and rarefraction - Check if i transformed abundance to presence/abscence in sample curves
+```{r}
+relevent_trawls_depths$Bef.aft_MHW <- paste(relevent_trawls_depths$Before.after,relevent_trawls_depths$MHW_ID)
+relevent_trawls_depths <- relevent_trawls_depths %>% relocate(Bef.aft_MHW,.after = MHW_ID)
+relevent_trawls_depths$Bef.aft_MHW <- as.factor(relevent_trawls_depths$Bef.aft_MHW)
+relevent_trawls_depths$Before.after <- as.factor(relevent_trawls_depths$Before.after)
+relevent_trawls_depths$Period_Bef.Aft <- factor(relevent_trawls_depths$Period_Bef.Aft,levels = c("1990-4 Before",
+                                         "1990-4 After",
+                                         "2000 Before",
+                                         "2000 After",
+                                         "2008-12 Before",
+                                         "2008-12 After"),ordered = T)
+
+## Richness
+
+richness_plot <- relevent_trawls_depths %>%
+  ggplot()+
+  aes(x  = Period_Bef.Aft, y = total_sp_number)+
+  stat_summary(geom = "bar",fun.data = mean_se,fill = "lightblue")+
+  stat_summary(geom = "errorbar", fun.data = mean_se, position = "dodge",width = 0.3)+
+  xlab("Before/after period")+
+  ylab("Mean richness")
+
+## Total abundance
+
+first_spe_col <- 17
+sp_matrix <- relevent_trawls_depths[,first_spe_col:ncol(relevent_trawls_depths)]
+raremax <- sp_matrix %>% rowSums() %>% min()
+relevent_trawls_depths %>% ggplot()+
+  aes(x = total_ind_number)+
+  geom_histogram()+
+  scale_x_log10()
+
+## Rarify richness bar plot
+
+rare_index_raremax <- rarefy(x=sp_matrix,sample=raremax)
+relevent_trawls_depths$rarefied_richness <- rare_index_raremax
+relevent_trawls_depths <- relevent_trawls_depths %>% relocate(rarefied_richness,.after = total_ind_number)
+first_spe_col <- 18
+
+rare_richness_plot <- relevent_trawls_depths %>% 
+  ggplot()+
+  aes(x  = Period_Bef.Aft, y = rarefied_richness)+
+  stat_summary(geom = "bar",fun.data = mean_se,fill = "deepskyblue2")+
+  stat_summary(geom = "errorbar", fun.data = mean_se, position = "dodge",width = 0.3)+
+  xlab("Sampling Period") +
+  ylab("Rarefied richness")
+
+## Rarification curves - individual
+
+ind_based_rare_all<-list()
+for (i in 1:nrow(relevent_trawls_depths)) { # for each row...
+
+one_trawl <- relevent_trawls_depths[i,] # filter
+one_trawl_sp_matrix <- one_trawl[,first_spe_col:ncol(one_trawl)] # create sp_matrix
+one_trawl_sp_matrix <- as.integer(one_trawl_sp_matrix)
+rarefaction <- rarefaction.individual(one_trawl_sp_matrix, method = "sample-size", q = 0) # apply rarefaction function
+
+rarefaction$Period_Bef.Aft<-one_trawl$Period_Bef.Aft 
+rarefaction$Bef.aft_MHW<-one_trawl$Bef.aft_MHW
+rarefaction$Before.after<-one_trawl$Before.after
+rarefaction$Serial<-one_trawl$Serial
+
+ind_based_rare_all[[i]]<- rarefaction # save in my list
+  
+}
+
+ind_based_rare_all<-bind_rows(ind_based_rare_all) # convert from list to data frame
+
+colnames(ind_based_rare_all)<-c("Individuals","Richness","Period_Bef.Aft","Bef.aft_MHW","Before.after","Serial") # change columns names
+
+# plot
+
+ggplot(ind_based_rare_all,aes(x=Individuals,y=Richness,group=Serial ,color = Period_Bef.Aft))+
+  geom_line()
+
+##Period
+group_data <- relevent_trawls_depths %>% 
+  select(Period,first_spe_col:ncol(relevent_trawls_depths)) %>% 
+  group_by(Period) %>% 
+  summarize(across(.fns = sum), .groups = "drop")
+ind_based_rare_p<-list()
+
+for (i in unique(group_data$Period)) {
+
+one_period<-group_data %>% filter(Period == i)
+period_sp_matrix <- one_period[,4:ncol(one_period)]
+period_sp_matrix <- as.integer(period_sp_matrix)
+rarefaction <- rarefaction.individual(period_sp_matrix, method = "sample-size", q = 0)
+
+rarefaction$Period <- i
+
+ind_based_rare_p[[i]]<- rarefaction
+  
+}
+ind_based_rare_p <- bind_rows(ind_based_rare_p)
+min_max_specie <- ind_based_rare_p %>%
+  group_by(Period) %>% 
+  summarise(max_sp=max(Individuals))
+min_max_specie <- min(min_max_specie$max_sp)
+colnames(ind_based_rare_p)<-c("Individuals","Richness","Period")
+ind_based_rare_p$Period <- factor(ind_based_rare_p$Period,levels = c("1990-4",
+                                         "2000",
+                                         "2008-12"),ordered = T)
+color_palette <- c("#E41A1C", "#377EB8", "#4DAF4A")
+ggplot(ind_based_rare_p,aes(x=Individuals,y=Richness))+
+  geom_line(size = 1,aes(color=Period))+
+  scale_color_manual(values = color_palette)+
+  geom_vline(xintercept = min_max_specie,linetype="dashed")+
+  scale_x_continuous(breaks = seq(0,15000,3000))+
+  theme_bw()
+
+
+
+  ##Before after period
+group_data <- relevent_trawls_depths %>% 
+  select(Period_Bef.Aft,Period,Before.after,first_spe_col:ncol(relevent_trawls_depths)) %>% 
+  group_by(Period_Bef.Aft,Period,Before.after) %>% 
+  summarize(across(.fns = sum), .groups = "drop")
+ind_based_rare_p<-list()
+
+for (i in unique(group_data$Period_Bef.Aft)) {
+
+one_period<-group_data %>% filter(Period_Bef.Aft == i)
+period_sp_matrix <- one_period[,4:ncol(one_period)]
+period_sp_matrix <- as.integer(period_sp_matrix)
+rarefaction <- rarefaction.individual(period_sp_matrix, method = "sample-size", q = 0)
+
+rarefaction$Period_Bef.Aft  <-i
+rarefaction$Period <- one_period$Period
+rarefaction$Before.after <- one_period$Before.after
+
+ind_based_rare_p[[i]]<- rarefaction
+  
+}
+
+ind_based_rare_p <- bind_rows(ind_based_rare_p)
+colnames(ind_based_rare_p)<-c("Individuals","Richness","Period_Bef.Aft","Period","Before.after")
+min_max_specie_bef_aft <- ind_based_rare_p %>%
+  group_by(Period_Bef.Aft,Period) %>% 
+  summarise(max_sp=max(Individuals))
+min_max_specie_bef_aft <- min_max_specie_bef_aft %>%
+  group_by(Period) %>% 
+  summarise(min_sp=min(max_sp))
+ind_based_rare_p$Period <- factor(ind_based_rare_p$Period,levels = c("1990-4",
+                                         "2000",
+                                         "2008-12"),ordered = T)
+color_palette <- c("#E41A1C", "#4DAF4A")
+ind_based_rare_p$Before.after <- as.factor(ind_based_rare_p$Before.after)
+ind_base_plot <- ggplot(ind_based_rare_p,aes(x=Individuals,y=Richness))+
+  geom_line(size = 1,aes(linetype = Before.after,color=Period))+
+  geom_vline(xintercept = c(min_max_specie_bef_aft$min_sp),color=color_palette,linetype="dashed",size=1
+             )+
+  scale_color_manual(values = color_palette)+
+  scale_linetype_manual(values=c("dotted","solid"))+
+   # facet_wrap(~Period,scales = "free_x")+
+  theme_bw()
+
+
+
+  ##Before after MHW
+relevent_trawls_depths$MHW_ID <- as.factor(relevent_trawls_depths$MHW_ID)
+group_data <- relevent_trawls_depths %>% 
+  select(MHW_ID,Period,Bef.aft_MHW,Before.after,first_spe_col:ncol(relevent_trawls_depths)) %>% 
+  group_by(MHW_ID,Period,Before.after,Bef.aft_MHW) %>% #this tells R to view my_data in terms of groups of year_season
+  summarize(across(.fns = sum), .groups = "drop")
+ind_based_rare<-list()
+
+for (i in unique(group_data$Bef.aft_MHW)) {
+
+one_period<-group_data %>% filter(Bef.aft_MHW == i)
+period_sp_matrix <- one_period[,5:ncol(one_period)]
+period_sp_matrix <- as.integer(period_sp_matrix)
+rarefaction <- rarefaction.individual(period_sp_matrix, method = "sample-size", q = 0)
+
+rarefaction$Bef.aft_MHW  <-i
+rarefaction$MHW_ID  <-one_period$MHW_ID
+rarefaction$Period <- one_period$Period
+rarefaction$Before.after <- one_period$Before.after
+
+ind_based_rare[[i]]<- rarefaction
+  
+}
+
+ind_based_rare <- bind_rows(ind_based_rare)
+colnames(ind_based_rare)<-c("Individuals","Richness","Bef.aft_MHW","MHW_ID","Period","Before.After")
+
+ind_based_rare$MHW_ID <- as.factor(ind_based_rare$MHW_ID)
+ind_based_rare$Period <- as.factor(ind_based_rare$Period)
+ind_based_rare$Before.after <- as.factor(ind_based_rare$Before.after)
+color_palette <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00","green", "#FFFF33", "#F64B2F","#A65628", "#F781BF", "#999999","gold","black","purple","blue")
+
+ggplot(ind_based_rare,aes(x=Individuals,y=Richness,color = MHW_ID))+
+  geom_line(size = 1,aes(linetype = Before.after))+
+  facet_wrap(~Period,scales = "free_x")+
+  scale_color_manual(values = color_palette)
+
+## Rarefacation curves - samples re-scaled x axis 
+
+mean_density <- relevent_trawls_depths %>%
+  group_by(Period_Bef.Aft) %>%
+  summarise("mean_ind" = mean(total_ind_number)) 
+
+sample_based_rare<-list()
+
+for (i in unique(relevent_trawls_depths$Period_Bef.Aft)) {
+
+one_period<-relevent_trawls_depths %>% filter(Period_Bef.Aft == i)
+period_sp_matrix <- one_period[,first_spe_col:ncol(one_period)]
+
+rarefaction <- rarefaction.sample(period_sp_matrix, method = "sample-size", q = 0)
+
+rarefaction$Period_Bef.Aft<-i
+rarefaction$Period <- one_period$Period
+rarefaction$Before.after <- one_period$Before.after
+
+sample_based_rare[[i]]<- rarefaction
+  
+}
+sample_based_rare<-bind_rows(sample_based_rare)
+
+colnames(sample_based_rare)<-c("samples","Richness","Period_Bef.Aft","Period","Before.After")
+color_palette <- c("#E41A1C", "#4DAF4A")
+sample_based_rare <- left_join(sample_based_rare,mean_density)
+sample_based_rare<-sample_based_rare %>%
+  mutate("Individuals" = samples * mean_ind)
+min_max_specie_bef_aft <- sample_based_rare %>%
+  group_by(Period_Bef.Aft,Period) %>% 
+  summarise(max_sp=max(Individuals))
+min_max_specie_bef_aft <- min_max_specie_bef_aft %>%
+  group_by(Period) %>% 
+  summarise(min_sp=min(max_sp))
+samp_base_plot <- ggplot(sample_based_rare,aes(x=Individuals,y=Richness))+
+  geom_line(size = 1,aes(linetype = Before.After,color=Period))+
+  geom_vline(xintercept = c(min_max_specie_bef_aft$min_sp),color=color_palette,linetype="dashed",size=1
+             )+
+  scale_color_manual(values = color_palette)+
+  scale_linetype_manual(values=c("dotted","solid"))+
+  ylab("Richness")+
+   # facet_wrap(~Period,scales = "free_x")+
+  theme_bw()
+  
+
+
+#sample and individual curves combined
+sample_based_rare$Rarefacation <- "Sample-based"
+ind_based_rare_p$Rarefacation <- "Individual-based"
+ind_based_rare_p$samples <- NA
+ind_based_rare_p$mean_ind <- NA
+combined_rare <- rbind(ind_based_rare_p,sample_based_rare)
+comb_base_plot <- ggplot(combined_rare,aes(x=Individuals,y=Richness))+
+  geom_line(size = 1,aes(linetype = Before.After,color=Rarefacation))+
+  # scale_color_manual(values = color_palette)+
+  scale_linetype_manual(values=c("dotted","solid"))+
+  ylab("Richness")+
+  # scale_x_continuous(sec.axis = sec_axis(~./unique(combined_rare$mean_ind)))+
+  facet_wrap(~Period,scales = "free_x")+
+  theme_bw()
+
+# Shanon-Winner rarefactaion curves
+shannon_rare<-list()
+
+for (i in unique(relevent_trawls_depths$Period_Bef.Aft)) {
+
+one_period<-relevent_trawls_depths %>% filter(Period_Bef.Aft == i)
+
+period_sp_matrix <- one_period[,first_spe_col:ncol(one_period)]
+rarefaction  <- rarefaction.sample(period_sp_matrix, method = "sample-size", q = 1)
+
+rarefaction$Period_Bef.Aft  <-i
+rarefaction$Period <- one_period$Period
+rarefaction$Before.after <- one_period$Before.after
+
+shannon_rare[[i]]<- rarefaction 
+  
+}
+
+shannon_rare <- bind_rows(shannon_rare)
+colnames(shannon_rare)<-c("Samples","Shannon","Period_Bef.Aft","Period","Before.after")
+shannon_rare$Period_Bef.Aft <- factor(shannon_rare$Period_Bef.Aft,levels = c("1990-4 Before",
+                                         "1990-4 After",
+                                         "2000 Before",
+                                         "2000 After",
+                                         "2008-12 Before",
+                                         "2008-12 After"),ordered = T)
+color_palette <- c("#E41A1C", "#4DAF4A")
+shannon_rare <- left_join(shannon_rare,mean_density)
+shannon_rare<-shannon_rare %>%
+  mutate("Individuals" = Samples * mean_ind)
+shannon_rare <- shannon_rare %>% filter(Period!="2000")
+
+shannon_rare$Period <- as.factor(shannon_rare$Period)
+shannon_rare$Before.after <- as.factor(shannon_rare$Before.after)
+ggplot(shannon_rare,aes(x=Individuals,y=Shannon,color = Period))+
+  geom_line(size = 1,aes(linetype = Before.after))+
+  scale_color_manual(values = color_palette)
+shanon_curve_plot <- ggplot(shannon_rare,aes(x=Individuals,y=richness))+
+  geom_line(size = 1,aes(linetype = Before.After,color=Period))+
+  geom_vline(xintercept = c(min_max_specie_bef_aft$min_sp),color=color_palette,linetype="dashed",size=1
+             )+
+  scale_color_manual(values = color_palette)+
+  scale_linetype_manual(values=c("dotted","solid"))+
+   # facet_wrap(~Period,scales = "free_x")+
+  theme_bw()
+
+
+
+#coverage based curve - doesn't work good!
+coverage_based_rare<-list()
+
+for (i in unique(relevent_trawls_depths$Period_Bef.Aft)) {
+
+one_period<-relevent_trawls_depths %>% filter(Period_Bef.Aft == i)
+
+period_sp_matrix <- one_period[,first_spe_col:ncol(one_period)]
+rarefaction <- rarefaction.sample(period_sp_matrix, method = "coverage", q = 0)
+
+rarefaction$Period_Bef.Aft  <-i
+rarefaction$Period <- one_period$Period
+rarefaction$Before.after <- one_period$Before.after
+
+coverage_based_rare[[i]]<- rarefaction
+  
+}
+coverage_based_rare<-bind_rows(coverage_based_rare)
+colnames(coverage_based_rare)<-c("Samples","richness","Period_Bef.Aft","Period","Before.after")
+color_palette <- c("#E41A1C", "#377EB8", "#4DAF4A")
+
+ggplot(coverage_based_rare,aes(x=Samples,y=richness,color = Period))+
+  geom_line(size = 1,aes(linetype = Before.after))+
+  scale_color_manual(values = color_palette)+
+  xlab("Covrage")+
+  ylab("Richness")
+
+## comparing rarefacation
+sp_matrix<-group_data %>% select(Period_Bef.Aft,4:ncol(group_data)) %>% arrange(Period_Bef.Aft)
+
+sp_matrix<-as.data.frame(sp_matrix) # make sure your data is defined as data.frame
+
+eco_test <- EcoTest.individual(sp_matrix[,-1], niter = 500, MARGIN=1,q=0)
+plot(eco_test)
+```
+ 
+## Transformations
+```{r}
+sp_matrix <- relevent_trawls_depths[,first_spe_col:ncol(relevent_trawls_depths)]
+hlgr_trans_data <- decostand(sp_matrix,method = "hellinger")
+log_trans_data <- decostand(sp_matrix,method = "log", base = 10)
+wis_trans_data <- wisconsin(sp_matrix)
+```
+#Ordinations
+## PCA
+```{r}
+sample_number <- nrow(sp_matrix)
+species_number <- ncol(sp_matrix)
+sample_number >= species_number 
+species_abundance <- colSums(sp_matrix) # sum the abundances of each species
+
+abund_rank <- sort(species_abundance, decreasing = T) # this will rank according to how many individuals were observed in all the data
+
+sp_names <- names(abund_rank[1:sample_number]) # 1 is most common, get until we get the n-th most common
+
+filterd_sp_matrix <- sp_matrix %>% select(all_of(sp_names)) 
+PCA_results <- princomp(filterd_sp_matrix, scores = T)
+
+
+autoplot(PCA_results,loadings = TRUE,loadings.label = TRUE,
+         data = relevent_trawls_depths,
+         colour = 'Period_Bef.Aft')
+summary(PCA_results)
+PCA_results$scores  # the scores of each sites on each PCA axis
+PCA_results$loadings   # the loading of each species on each PCA axis
+filterd_sp_matrix$`Plotosus lineatus`
+filterd_sp_matrix$`Upeneus moluccensis`
+
+log_trans_data <- decostand(filterd_sp_matrix, method = "log",base = 10) 
+helg_log_trans_data <- decostand(log_trans_data, method = "hellinger")
+PCA_helg_log_results <- princomp(helg_log_trans_data, scores = T) # run the PCA analyses
+color_palette <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3")
+autoplot(PCA_helg_log_results,
+          loadings = TRUE,
+          loadings.label = TRUE,
+         loadings.colour = 'black',
+         loadings.label.colour = "black", 
+         data = relevent_trawls_depths,
+         colour = 'Period_Bef.Aft')+
+  scale_color_manual(values =color_palette)
+summary(PCA_helg_log_results) #  Importance of components
+PCA_helg_log_results$scores  # the scores of each sites on each PCA axis 
+PCA_helg_log_results$loadings
+```
+## RDA
+```{r}
+log_trans_data <- decostand(sp_matrix, method = "log",base = 10) 
+helg_log_trans_data <- decostand(log_trans_data, method = "hellinger")
+relevent_trawls_depths_1 <- relevent_trawls_depths
+relevent_trawls_depths_1 <- merge(relevent_trawls_depths_1,MHW_metadata[,1:10],by = "MHW_ID")
+rda_results <- rda(helg_log_trans_data ~ Before.after+Period+North_south+Season+Mean.Depth,
+                data = relevent_trawls_depths_1,
+                na.action = na.omit) 
+
+rda_results
+plot(rda_results,display = c("site","cn"))
+
+colvec <- c("#A52A2A", "#FF3131", "#4DAF4F", "#7CFC00") #  colors according to your group
+relevent_trawls_depths_1 <-relevent_trawls_depths_1 %>%   mutate(pch = case_when(
+    Before.after == "Before" ~ 10,  
+    Before.after == "After" ~ 16   ,
+    TRUE ~ 1                  
+  )) 
+
+
+plot(rda_results) # plot RDA
+
+with(relevent_trawls_depths, points(rda_results,
+                     display = "sites", col = colvec[Period_Bef.Aft],
+                     pch = relevent_trawls_depths_1$pch, bg = colvec[Period_Bef.Aft],cex=1.5)) # add color to the scores
+
+with(relevent_trawls_depths, legend(x=c(0.9,1.4),y=c(0,-0.5),y.intersp = 0.5,x.intersp = 0.5, legend = levels(Period_Bef.Aft), bty = "n",col = colvec, pch = c(10,16,10,16), pt.bg = colvec,cex=1.2)) # add legend
+
+ orditorp(rda_results,display = "species",choices = c(1,2),air =1, col = "black") # add labels to some species
+
+text(rda_results, display = "cn", col = "blue",cex=1) 
+
+
+ordistep(rda_results)
+anova.cca(rda_results,by = "term")
+
+```
+
+## CCA
+```{r}
+helg_log_trans_data <- decostand(log_trans_data, method = "hellinger")
+
+cca_results <- cca(helg_log_trans_data ~ Period_Bef.Aft + Area + Depth_group,
+                data = relevent_trawls_depths,
+                na.action = na.omit) 
+plot(cca_results, scaling = 3)
+cca_results
+```
+## nMDS
+```{r}
+nmds_data <- helg_log_trans_data
+# nmds_data <- sp_matrix
+nmds_data<-vegdist(nmds_data,method = "bray")
+ord  <- metaMDS(nmds_data,trace = FALSE)
+stressplot(ord)
+ord$stress
+relevent_trawls_depths$Period_Bef.Aft <- factor(relevent_trawls_depths$Period_Bef.Aft,levels = c("1990-4 Before",
+                                         "1990-4 After",
+                                         "2008-12 Before",
+                                         "2008-12 After"),ordered = T)
+relevent_trawls_depths$Before.after <- as.factor(relevent_trawls_depths$Before.after)
+plot(ord)
+
+relevent_trawls_depths_1 <- relevent_trawls_depths
+relevent_trawls_depths_1 <-relevent_trawls_depths_1 %>%   mutate(color_column = case_when(
+    Period_Bef.Aft == "1990-4 After" ~ "#E41A1C",            # Assign red color for Level1
+    Period_Bef.Aft == "1990-4 Before" ~ "#E41A1C",           # Assign blue color for Level2
+    Period_Bef.Aft == "2008-12 Before" ~ "#4DAF4A",
+    Period_Bef.Aft == "2008-12 After" ~ "#4DAF4A",# Assign green color for Level3
+    TRUE ~ "black"                                # Default color for other levels
+  )) 
+relevent_trawls_depths_1 <-relevent_trawls_depths_1 %>%   mutate(pch = case_when(
+    Before.after == "Before" ~ 10,  
+    Before.after == "After" ~ 16   ,
+    TRUE ~ 1                  
+  )) 
+colvec <- c("#A52A2A", "#FF3131", "#4DAF4F", "#7CFC00") #  colors according to your group
+
+# ordiplot(ord, type = "n",main = paste("stress=",round(ord$stress,3))) # create the plot
+# orditorp(ord, label = T, display = "sites", col = relevent_trawls_depths_1$color_column,pch = as.numeric(relevent_trawls_depths$Before.after),cex=1.5) # add scores and color by sites
+# # ordihull(ord, groups = relevent_trawls_depths$Period_Bef.Aft, draw = "polygon",alpha = 0.35,label=F ,lty = 1,col = colvec) # add convex hull
+# ordiellipse(ord, groups = relevent_trawls_depths$Period_Bef.Aft,kind = "sd", draw = "polygon",alpha = 0.35,label=F ,lty = 1,col = colvec)
+# legend("bottomright", legend = levels(relevent_trawls_depths$Period_Bef.Aft), bty = "n", col = colvec, pch = 15,cex=0.8) # add legend
+
+ordiplot(ord, type = "n",main = paste("stress=",round(ord$stress,3)),xlim = c(-1.4,1.5)) # create the plot
+orditorp(ord, label = T, display = "sites", col = relevent_trawls_depths_1$color_column,pch = relevent_trawls_depths_1$pch,cex=1.5) # add scores and color by sites
+ordiellipse(ord, groups = relevent_trawls_depths$Period_Bef.Aft,kind = "sd", draw = "polygon",alpha = 0.35,label=F ,lty = 1,col = colvec)
+legend(x=c(0.7,1.6),y=c(0.2,-0.6),bty="n", legend = levels(relevent_trawls_depths$Period_Bef.Aft), col = relevent_trawls_depths_1$color_column, pch = c(10,16,10,16),cex=1.3,y.intersp = 0.5,x.intersp = 0.5) # add legend
+# points(period_bef.aft_centroid[, "NMDS1"], period_bef.aft_centroid[, "NMDS2"], col = "black", pch = 21,cex=2.7,bg=colvec) # assuming you want red color and solid circle shape for centroids
+
+
+relevent_trawls_depths_1$Period <- as.factor(relevent_trawls_depths_1$Period)
+relevent_trawls_depths_1$North_south <- as.factor(relevent_trawls_depths_1$North_south)
+relevent_trawls_depths_1$Season <- as.factor(relevent_trawls_depths_1$Season)
+
+env_columns <- relevent_trawls_depths_1 %>% 
+  select(Period,Mean.Depth,Before.after,Season,North_south)
+output_env <- envfit(ord, env_columns, permu = 100,na.rm = T)
+output_env
+
+
+adon.results <- adonis2(nmds_data ~Period_Bef.Aft, 
+                        data = relevent_trawls_depths,
+                        method="bray",
+                        perm=999,
+                        na.action =na.omit)
+
+adon.results
+pairwise<-betadisper(nmds_data, # the distance matrix
+                     relevent_trawls_depths$Period_Bef.Aft) # the groups
+
+par(mar=c(5,15,4,1))
+plot(TukeyHSD(pairwise),las=2)
+simper_output<-simper(helg_log_trans_data, #my community data (transformed)
+                      group = relevent_trawls_depths$Period_Bef.Aft) # my group
+
+summary(simper_output)
 ```
 
 ##Plots
@@ -167,4 +1082,108 @@ relevent_trawls %>% ggplot()+
 
 
 
+
+
+## Community assembly
+```{r}
+filtered_period <- relevent_trawls_depths %>% filter(Period == unique(relevent_trawls_depths$Period)[1])
+filtered_period <- filtered_period %>% arrange(desc(Before.after))
+sp_matrix_filtered <- filtered_period[,first_spe_col:ncol(relevent_trawls_depths)]
+nest_temp <- nestedtemp(sp_matrix_filtered)
+plot(nest_temp, xlab = "Species", ylab="Sites",main="Extinction probability")
+
+```
+
+
+# Assembly rules
+## Coocuurence
+```{r}
+cooccur_periods <- list()
+for (i in unique(relevent_trawls_depths$Period_Bef.Aft)) {
+  
+try_df <- relevent_trawls_depths %>% filter(Period_Bef.Aft==i)
+sp_try <- try_df[,first_spe_col:ncol(try_df)]
+sp_try <- sp_try[, colSums(sp_try != 0) > 0]
+NullResults_q <- oecosimu(sp_try,
+                          nestfun="nestedchecker",
+                          statistic = "C.score",
+                          method="c0",
+                          nsimul = 1000)
+qs_SES <- NullResults_q[["oecosimu"]][["z"]]   
+pval<- NullResults_q[["oecosimu"]][["pval"]]
+data <- data.frame("Period_Bef.Aft" = i,
+                     "SES" = qs_SES,
+                     "P_value" = pval)
+cooccur_periods[[i]]<- data
+
+# # nested_checker_fish <- nestedchecker(sp_try)
+# # nested_checker_fish
+# # NullResults_r1 <-  oecosimu(sp_try,
+#                              # nestfun="nestedchecker",
+#                              # statistic = "C.score",
+#                              # method="r1",
+#                              # nsimul = 100) #run the function
+# 
+# # sim_r1 <-as.data.frame(t(NullResults_r1[["oecosimu"]][["simulated"]])) # convert the relevant part of the list to dataframe
+# 
+# # observed <- nested_checker_fish[["C.score"]] # what is the real value for my data
+# 
+# # # ggplot(sim_r1,aes(x=V1))+
+# #   geom_histogram(fill = "lightblue",color = "darkblue")+
+# #   geom_vline(xintercept = observed,color = "darkred",linetype="dashed",size = 1.1)+
+# #   xlab("Simulated C-scores")+
+# #   ggtitle("Random Null Model (R1)")
+# # R1_SES <- NullResults_r1[["oecosimu"]][["z"]] #extract standardized Effect Size
+# 
+# t_species_matrix <- sp_try %>% t() %>% as.data.frame()
+# 
+# t_species_matrix<-decostand(t_species_matrix,"pa") # convert the data to presence/absence 
+# 
+# cooccur_results <- cooccur(mat = t_species_matrix,spp_names = TRUE)
+# 
+# plot(cooccur_results)  #plots heat map
+# cooccurSES =  effect.sizes(cooccur_results)
+# cooccurSES$Period <- try_df$Period[1]
+# cooccurSES$Period_Bef.Aft <- try_df$Period_Bef.Aft[1]
+# cooccurSES$Before.after <- try_df$Before.after[1]
+# cooccur_periods[[i]] <- cooccurSES
+#   
+}
+ses_qs <- bind_rows(cooccur_periods)
+ses_qs<-ses_qs %>% mutate(significent_sign = case_when(P_value > 0.1 ~ "n.s",
+                                                       P_value > 0.05 & P_value <= 0.1 ~ "(.)",
+                                                       P_value > 0.01 & P_value <= 0.05 ~ "*",
+                                                       P_value > 0.005 & P_value <= 0.01 ~ "**",
+                                                       P_value <= 0.005 ~ "***"))
+ses_qs$Period_Bef.Aft <- factor(ses_qs$Period_Bef.Aft,levels = c("1990-4 Before",
+                                         "1990-4 After",
+                                         "2008-12 Before",
+                                         "2008-12 After"),ordered = T)
+ses_qs$pch <-c(10,10,16,16)
+colvec <- c("#A52A2A", "#FF3131", "#4DAF4F", "#7CFC00") #  colors according to your group
+ggplot(data = ses_qs,aes(x = Period_Bef.Aft,y = SES,color = Period_Bef.Aft))+
+  geom_point(size = 5,pch=ses_qs$pch)+
+  theme_bw()+xlab("Sampling Period")+
+  scale_color_manual(values = colvec)+
+  ggtitle("C-score - C0 null model")+
+    geom_text(
+    aes(label = significent_sign, y = SES + 0.2),
+    position = position_dodge(0.9),
+    vjust = 0
+  )
+
+  # cooccur_periods$sps <- paste(cooccur_periods$sp1,cooccur_periods$sp2)
+# try_period <- cooccur_periods %>% filter(Period=="1990-4")
+# write.csv(try_period,"Med/Community Ecology/coocurence_90.csv")
+```
+##Nestedness
+```{r}
+nestedtemp(fully_nested)
+nestedtemp(not_nested)
+my_nest_temp <- nestedtemp(sp_try)
+plot(my_nest_temp, xlab = "Species", ylab="Sites",main="Extinction probability")
+
+
+
+```
 

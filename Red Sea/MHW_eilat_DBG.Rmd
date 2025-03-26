@@ -1,0 +1,1906 @@
+---
+title: "MHW_eilat_DBG"
+author: "Dan Bez Golanski"
+date: "2023-11-01"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+# load packages
+```{r warning=FALSE}
+library(tidyverse)
+library(patchwork)
+library(lubridate)
+library(suncalc)
+library(openxlsx)
+library(ggplot2)
+library(mgcv)
+library(gratia)
+library(DataExplorer)
+library(VGAM) ## GAM
+library(tidymv) # Plot_smooths
+library(rfishbase)
+library(glatos) # for collision estimating
+```
+
+
+# Functions
+```{r}
+Filter_Fish <- function(fish_ids,raw_fish_df) { 
+filter_fish <- raw_fish_df %>% filter(fish_id %in% fish_ids)
+filter_fish <- filter_fish %>%
+  arrange(fish_id,real_datetime)
+return(filter_fish)
+}
+
+#need to have fish_id and real_datetime columns before using 
+Compute_sampling_freq <- function(filter_fish,valuble_fish) {
+  filter_fish$date <- as.Date(filter_fish$real_datetime,format = "%d/%m/%y")
+  samp_freq_df <- data.frame(fish_id=integer(),
+                           date=POSIXct(),
+                           mean_freq_min=double(),
+                           median_freq_min=double(),
+                           n=integer())
+for (fish in valuble_fish) {
+  temp_fish <- filter_fish %>% filter(fish_id==fish)
+  for (day in unique(temp_fish$date)) {
+    temp_day <- temp_fish %>% filter(date==day)
+    freq_vector <- c()
+    for (row_num in 2:dim(temp_day)[1]) {
+      freq_vector[row_num-1] <-   
+        difftime(temp_day$real_datetime[row_num],temp_day$real_datetime[row_num-1],units = "mins")
+    }
+    temp_samp_df <- data.frame(fish_id=fish,
+                                 date=day,
+                                 mean_freq_min = mean(freq_vector),
+                                 median_freq_min= median(freq_vector),
+                                 n=length(freq_vector))
+    samp_freq_df <- rbind(samp_freq_df,temp_samp_df)
+  }
+  
+}
+samp_freq_df$date <- as.Date(samp_freq_df$date,origin = "1970-01-01")
+rm(temp_day,temp_fish,temp_samp_df)
+return(samp_freq_df)
+}
+
+Before_After_MHW <- function(filter_fish,heatwave_date_start,heatwave_date_end,Continous = F) {
+# filter_fish$real_datetime <- parse_date_time(filter_fish$real_datetime, orders = "ymd HMS")
+heatwave_date_start <- parse_date_time(heatwave_date_start,orders = "ymd")
+heatwave_date_end <- parse_date_time(heatwave_date_end,orders = "ymd")
+filter_fish$Before_After <- ifelse(filter_fish$real_datetime < heatwave_date_start,"Before",ifelse(filter_fish$real_datetime > heatwave_date_end,"After","MHW"))
+if(Continous)
+{
+  for (row_num in 1:dim(filter_fish)[1]) {
+    if(filter_fish$Before_After[row_num]=="Before")
+    {
+      filter_fish$Before_After_continiuos[row_num] <- 
+        difftime(filter_fish$real_datetime[row_num],heatwave_date_start,units = "days")
+    } else if(filter_fish$Before_After[row_num]=="After")
+    {
+      filter_fish$Before_After_continiuos[row_num] <- 
+        difftime(filter_fish$real_datetime[row_num],heatwave_date_end,units = "days")
+    }
+    else
+    {
+      filter_fish$Before_After_continiuos[row_num] <- 0
+    }
+  }
+}
+return(filter_fish)
+}
+
+Add_Day_Period <- function(MHW_Data) {
+#Eilat coordinates
+date_sun_df <- data.frame(date=as.Date(unique(MHW_Data$date)),
+                          lat=29.538417,
+                          lon=34.954417)
+date_sun_df <- getSunlightTimes(data = date_sun_df, keep = 
+                                 c("sunriseEnd","sunsetStart","night","nightEnd"),tz="Asia/Jerusalem")
+# In order to ease the dealing with date and time after
+date_sun_df[,4:7] <- force_tz(date_sun_df[,4:7],tz="UTC")
+for (date_num in date_sun_df$date) {
+  temp_date <- MHW_Data %>% filter(date==date_num)
+  temp_sun <- date_sun_df %>% filter(date==date_num)
+  temp_date$Period <- ifelse(temp_date$real_datetime>temp_sun$sunriseEnd[1] & 
+                                     temp_date$real_datetime<temp_sun$sunsetStart[1],"Day",
+                                   ifelse(temp_date$real_datetime>temp_sun$nightEnd[1] & 
+                                     temp_date$real_datetime<temp_sun$sunriseEnd[1],"Dawn",
+                                     ifelse(temp_date$real_datetime>temp_sun$sunsetStart[1] & 
+                                     temp_date$real_datetime<temp_sun$night[1],"Dusk","Night")))
+  MHW_Data$Period[MHW_Data$date==date_num] <- temp_date$Period 
+  }
+return(MHW_Data)
+}
+
+conditional_merge <- function(df1, df2, by_cols) {
+  if (nrow(df1) == 0) {
+    return(df2)
+  } else if (nrow(df2) == 0) {
+    return(df1)
+  } else {
+    return(merge(df1, df2, by = by_cols))
+  }
+  
+}
+
+Fill_In_temp_sum_heat_wave <- function(sum_heat_wave_colnames, temp_sum_heat_wave) {
+  missing_col_names <- sum_heat_wave_colnames[which(!(sum_heat_wave_colnames %in% colnames(temp_sum_heat_wave)))]
+  for (name in missing_col_names) {
+     temp_sum_heat_wave[,name] <- NA
+  }
+  return(temp_sum_heat_wave)
+  
+}
+
+time_to_decimal <- function(time) {
+  hours <- as.numeric(format(time, "%H"))
+  minutes <- as.numeric(format(time, "%M"))
+  seconds <- as.numeric(format(time, "%S"))
+  decimal_time <- hours + minutes / 60 + seconds / 3600
+  return(decimal_time)
+}
+
+models_comparison <- function(models)
+{
+  model_names <- paste0("Model_", seq_along(models))
+   comparison <- data.frame(
+    Model_number = model_names,  
+    model_formula = sapply(models, function(model) paste(deparse(formula(model)), collapse = "")),
+    AIC = sapply(models, AIC),
+    BIC = sapply(models, BIC),
+    LogLik = sapply(models, logLik),
+    Deviance = sapply(models, function(m) m$deviance),
+    R2 = sapply(models, function(m) summary(m)$r.sq)
+  )
+  # Order by AIC (ascending, best model first)
+  comparison <- comparison %>% arrange(AIC)
+  print(comparison)
+  return(comparison)
+}
+
+# -------------------------------
+# Function: run_model_safely()
+# Purpose: Runs a GAM model safely, catching errors and warnings.
+# If a model fails to converge, return NULL
+# -------------------------------
+run_model_safely <- function(formula, data, family) {
+  model <- tryCatch(
+    {
+      bam(formula, data = data, method = "REML", family = family)
+    },
+    error = function(e) {
+      message("❌ Model failed to run: ", conditionMessage(e))
+      return(NULL)  # Return NULL for failed models
+    },
+    warning = function(w) {
+      message("⚠️ Warning: ", conditionMessage(w))
+      return(NULL)  # Treat warnings as failures
+    }
+  )
+  
+  # If model runs but does not converge, remove it
+  if (!is.null(model) && !model$converged) {
+    message("⚠️ Model did not converge and will be removed.")
+    return(NULL)
+  }
+  
+  return(model)  # Return successfully fitted model
+}
+
+# -------------------------------
+# Function: automate_model_selection()
+# Purpose: Automates the process of model selection in 3 stages:
+#    1️⃣ Fit models without MHW effect
+#    2️⃣ Add MHW effect (smooth or fixed)
+#    3️⃣ Add species effect
+# Returns: 
+#    ✅ The best final model
+#    ✅ A list of all models created along the way
+# -------------------------------
+automate_model_selection <- function(data, response_var, family) {
+  
+  # Ensure the response variable exists in the dataset
+  if (!response_var %in% names(data)) {
+    stop("❌ Response variable not found in the dataset!")
+  }
+
+  all_models <- list()  # List to store all models created
+  
+  # -------------------------------------------
+  # 1️⃣ Step 1: Fit initial models (without MHW effect)
+  # -------------------------------------------
+  model_formulas_no_MHW <- list(
+    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, bs = 'cc', m = 2) + s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc', m = 1)")),
+    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc')")),
+    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, bs = 'cc', m = 2) + s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc', m = 1) + s(Serial_fish_id, bs = 're')")),
+    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc') + s(Serial_fish_id, bs = 're')"))
+  )
+
+  models_no_MHW <- lapply(model_formulas_no_MHW, run_model_safely, data = data, family = family)
+  models_no_MHW <- Filter(Negate(is.null), models_no_MHW)  # Remove NULL models
+
+  if (length(models_no_MHW) == 0) stop("❌ No models converged in the first step!")
+
+  all_models[["no_MHW"]] <- models_no_MHW  # Store models
+  
+  # Select the best model (the model object, not just formula)
+  best_no_MHW <- models_no_MHW[[which.min(sapply(models_no_MHW, AIC))]]
+  message("🏆 Best model without MHW: ", deparse(formula(best_no_MHW)))
+  
+  # -------------------------------------------
+  # 2️⃣ Step 2: Add MHW effect (smooth or fixed)
+  # -------------------------------------------
+  model_formulas_with_MHW <- list(
+    formula(best_no_MHW),
+    update.formula(formula(best_no_MHW), . ~ . + s(DecimalTimeOfDay, by = Before_After, bs = 'cc')),  # Smooth effect
+    update.formula(formula(best_no_MHW), . ~ . + Before_After)  # Fixed effect
+  )
+
+  models_with_MHW <- lapply(model_formulas_with_MHW, run_model_safely, data = data, family = family)
+  models_with_MHW <- Filter(Negate(is.null), models_with_MHW)  # Remove NULL models
+  
+  if (length(models_with_MHW) == 0) stop("❌ No models converged with MHW effect!")
+  
+  all_models[["with_MHW"]] <- models_with_MHW
+  
+  # Select the best model with MHW (the model object, not just formula)
+  best_with_MHW <- models_with_MHW[[which.min(sapply(models_with_MHW, AIC))]]
+  message("🏆 Best model with MHW: ", deparse(formula(best_with_MHW)))
+  
+  # -------------------------------------------
+  # 3️⃣ Step 3: Add species effect
+  # -------------------------------------------
+  model_formulas_with_species <- list(
+    formula(best_with_MHW),
+    update.formula(formula(models_with_MHW[[1]]), . ~ . + species)
+  )
+
+  models_with_species <- lapply(model_formulas_with_species, run_model_safely, data = data, family = family)
+  models_with_species <- Filter(Negate(is.null), models_with_species)  # Remove NULL models
+
+  if (length(models_with_species) == 0) {
+    message("⚠️ No models converged with species effect. Returning best model without species.")
+    return(list(best_model = best_with_MHW, all_models = all_models))
+  }
+  
+  all_models[["with_species"]] <- models_with_species
+  
+  # Select the best final model (the model object, not just formula)
+  best_final <- models_with_species[[which.min(sapply(models_with_species, AIC))]]
+  message("🏆 Best final model with species: ", deparse(formula(best_final)))
+  
+  # Combine all lists in 'all_models' into one list
+  combined_models <- c(all_models$no_MHW, all_models$with_MHW, all_models$with_species)
+
+  # Remove duplicate models based on formula (or use a more advanced method if necessary)
+  model_formulas <- sapply(combined_models, function(model) deparse(formula(model)))
+  unique_formulas <- unique(model_formulas)
+  unique_models <- combined_models[model_formulas %in% unique_formulas]
+  
+  # Run model comparison on unique models
+  comparison_table <- models_comparison(unique_models)
+  
+  # Return the best model object and the comparison table
+  return(list(best_model = best_final, all_models = all_models, comparison_table = comparison_table))
+}
+
+
+
+```
+
+# Planning design - acoustic & fish
+## Collision planning and estimating
+```{r}
+# 6 seconds burst duration - according to thelma
+calc_prob1 <- calc_collision_prob(delayRng = c(120,240),burstDur = 6,maxTags = 15,nTrans=10000 )
+calc_prob2 <- calc_collision_prob(delayRng = c(150,210),burstDur = 6,maxTags = 15,nTrans=10000 )
+# 3 seconds burst duration
+calc_prob3 <- calc_collision_prob(delayRng = c(150,210),burstDur = 3,maxTags = 15,nTrans=10000 )
+calc_prob4 <- calc_collision_prob(delayRng = c(120,240),burstDur = 3,maxTags = 15,nTrans=10000 )
+# Detection probability plots
+plot(med ~ nTags,
+  data = calc_prob1, type = "p", pch = 20, ylim = c(0, 1),
+  xlab = "# of transmitters within range", ylab = "Probability of detection"
+)
+plot(med ~ nTags,
+  data = calc_prob2, type = "p", pch = 20, ylim = c(0, 1),
+  xlab = "# of transmitters within range", ylab = "Probability of detection"
+)
+plot(med ~ nTags,
+  data = calc_prob3, type = "p", pch = 20, ylim = c(0, 1),
+  xlab = "# of transmitters within range", ylab = "Probability of detection"
+)
+plot(med ~ nTags,
+  data = calc_prob4, type = "p", pch = 20, ylim = c(0, 1),
+  xlab = "# of transmitters within range", ylab = "Probability of detection"
+)
+# Collisions probability plots
+plot((1 - med) ~ nTags,
+  data = calc_prob1, type = "p", pch = 20, ylim = c(0, 1),
+  xlab = "# of transmitters within range", ylab = "Probability of collision"
+)
+
+```
+
+
+## Bioblitz analyze for NPA permit
+```{r}
+bioblitz_df <- read.xlsx("D:/Dan/Research/Projects/MHWs/Mediterranean/Bioblitz Data/Biob_data_2015-2023_all_data.xlsx",sheet = "Biob_data_2015-2023_Inc_Fall_20")
+study_species <- c("Diplodus.sargus","Siganus.luridus", "Siganus.rivulatus", "Epinephelus.marginatus")
+
+# Filter the data for Spring 2023
+bioblitz_df <- bioblitz_df %>% 
+  filter(year == 2023 & season == "Spring")
+
+# Summarize abundance by species
+bioblitz_summary <- bioblitz_df %>% 
+  group_by(species) %>% 
+  summarise(total_abundance = sum(abundance)) %>%
+  mutate(relative_abundance = total_abundance / sum(total_abundance)) %>%
+  arrange(desc(relative_abundance)) 
+
+# Add rank and ensure species is a factor
+bioblitz_summary <- bioblitz_summary %>%
+  mutate(rank_abundance = row_number(),
+         species = factor(species, levels = species),
+         is_study_species = ifelse(species %in% study_species, "Study Species", "Other"))
+
+# Plot with highlighted bars
+ggplot(bioblitz_summary, aes(x = species, y = relative_abundance, fill = is_study_species)) + 
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values = c("Study Species" = "red", "Other" = "grey")) +
+  labs(x = "Species", y = "Relative Abundance", title = "Relative Abundance by Species") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Filter to only study species
+bioblitz_summary_location <- bioblitz_df %>% filter(species %in% study_species)
+
+#Plot size histograms
+ggplot(bioblitz_summary_location, aes(y = length, fill = species)) +
+  geom_histogram() + 
+  facet_wrap(~ species, scales = "free") +
+  coord_flip()+
+  labs(y = "Length (cm)") +
+  scale_fill_manual(values = c("Diplodus.sargus" = "blue", 
+                               "Siganus.luridus" = "green", 
+                               "Siganus.rivulatus" = "purple", 
+                               "Epinephelus.marginatus" = "orange")) +
+  scale_y_continuous(breaks = seq(0, max(bioblitz_summary_location$length, na.rm = TRUE), by = 3)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1))
+  
+# Summarize abundance by species and location  
+bioblitz_summary_location <- bioblitz_summary_location %>% 
+  group_by(location, species) %>% 
+  summarise(total_abundance = sum(abundance), .groups = "drop") %>%
+  mutate(species = factor(species, levels = study_species))
+
+ggplot(bioblitz_summary_location, aes(x = location, y = total_abundance, fill = species)) +
+  geom_bar(stat = "identity", position = "dodge") + 
+  facet_wrap(~ species, scales = "free_y") +
+  labs(x = "Location", y = "Total Abundance", title = "Total Abundance by Location for Each Study Species") +
+  scale_fill_manual(values = c("Diplodus.sargus" = "blue", 
+                               "Siganus.luridus" = "green", 
+                               "Siganus.rivulatus" = "purple", 
+                               "Epinephelus.marginatus" = "orange")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+for (sp_i in bioblitz_df) {
+  hist(filterd_bioblitz$length[filterd_bioblitz$species==sp_i],main = paste("Histogram of" , sp_i) )
+}
+```
+
+
+# Data analysis
+## load data
+```{r}
+# Fish data 2016-2018
+fish_df <- readRDS("Red Sea/Renanel All data/2016 - 2018 parrotfish.rds") 
+# Fish data 2019-2021
+full_data <- readRDS("Red Sea/Renanel All data/2019 - 2021 parrotfish.rds") 
+# tags metadata
+tags_metadata <- read.xlsx("Red Sea/Renanel All data/ID list fish.xlsx")
+  
+#MHWs metadata according to different def and databases
+MHWs_Eilat_Fix_OISST <- read.xlsx("Red Sea/MHWs_def/MHW_OISST_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
+MHWs_Eilat_Moving_OISST <- read.xlsx("Red Sea/MHWs_def/MHW__detrend_31mm_OISST_Events_RedSea.xlsx",sheet = "Short_MHW_Events_Fixed")
+MHWs_Eilat_Fix_IUI <- read.xlsx("Red Sea/MHWs_def/MHW_IUI_1Daymean_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
+MHWs_Eilat_Fix_Amazia <- read.xlsx("Red Sea/MHWs_def/MHW_Amatzia_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
+
+#### Specifically now on the OISST Fix def and divided to two datasets based on the different time periods - need to be changed!
+MHWs_fish_data <- read.csv("Red Sea/Results/MHW Daily Curves/MHW_OISST_Fixbase_Fish_data_continious.csv")
+MHWs_parrotfish_data <- read.csv("Red Sea/Results/MHW Daily Curves/MHW_OISST_Fixbase_parrotfish_data_continious.csv")
+
+```
+## Filter full fish data to parrotfish/lionfish
+```{r}
+# filter parrotfish
+tags_metadata_parrot <- tags_metadata %>% filter(fish_type=="parrotfish")
+tags_metadata_parrot <- tags_metadata_parrot %>% rename("fish_id" = "id")
+parrotfish_data <- full_data %>% filter(id %in% tags_metadata_parrot$fish_id)
+parrotfish_data <- parrotfish_data %>% filter(!is.na(acc_tag) | !is.na(depth) )
+parrotfish_data <- parrotfish_data %>% rename("fish_id" = "id")
+
+# fliter lionfish
+tags_metadata_lion <- tags_metadata %>% filter(fish_type=="lionfish")
+lionfish_data <- all_fish_env %>% filter(Fish<9)
+write.csv(parrotfish_data,"Red Sea/Renanel All data/parrotfish_data.csv")
+write.csv(lionfish_data,"Red Sea/Renanel All data/lionfish_data.csv")
+```
+
+
+
+## Combine and format full_data and fish_df
+```{r}
+# Create combined dataset of the two time periods
+parrotfish_data <- parrotfish_data %>% select(dt_gmt2,fish_id,acc_tag,depth)
+parrotfish_data <- parrotfish_data %>% rename("real_datetime" = "dt_gmt2",
+                        "activity" = "acc_tag")
+parrotfish_data$real_datetime <- force_tz(parrotfish_data$real_datetime,tzone = "UTC")
+
+fish_df <- fish_df %>% select(real_datetime,depth,size,weight,fish_id,activity,distance_shore,water_temperature)
+fish_df$real_datetime <- force_tz(fish_df$real_datetime,tzone = "UTC")
+
+combined_parrotfish_df <- bind_rows(parrotfish_data,fish_df)
+combined_parrotfish_df$date <- as.Date(combined_parrotfish_df$real_datetime)
+combined_parrotfish_df <- combined_parrotfish_df %>% relocate(fish_id,.before = real_datetime)
+combined_parrotfish_df <- combined_parrotfish_df %>% relocate(date,.after = real_datetime)
+combined_parrotfish_df <- combined_parrotfish_df %>% relocate(distance_shore,.after = depth)
+combined_parrotfish_df <- combined_parrotfish_df %>% group_by(fish_id) %>%
+  mutate(centered_distance = distance_shore-mean(distance_shore),
+         standerized_distance=centered_distance/sd(distance_shore))
+combined_parrotfish_df <- combined_parrotfish_df %>% relocate(centered_distance,.after = distance_shore) %>%
+  relocate(standerized_distance,.after = centered_distance)
+combined_parrotfish_df <- combined_parrotfish_df %>% arrange(fish_id,real_datetime)
+
+# Correct negative depth values (if any exist)
+combined_parrotfish_df$depth[combined_parrotfish_df$depth<0] <- 0
+# Add species by fish id
+combined_parrotfish_df <- merge(combined_parrotfish_df,tags_metadata_parrot[,c(1,6)],by="fish_id")
+rm(fish_df,full_data,parrotfish_data)
+```
+
+## Organise, format and filter MHW_events df - after loading!
+```{r}
+################# Fix baseline OISST #################
+#number are equal to first and last MHW date as numeric in excel
+# MHWs_Eilat_Fix_OISST <- MHWs_Eilat_Fix_OISST %>% filter(duration<11 & date_start>= 42671 & date_start <= 43233)
+MHWs_Eilat_Fix_OISST$date_start <- as.Date(MHWs_Eilat_Fix_OISST$date_start,origin = "1899-12-30")
+MHWs_Eilat_Fix_OISST$date_peak <- as.Date(MHWs_Eilat_Fix_OISST$date_peak,origin = "1899-12-30")
+MHWs_Eilat_Fix_OISST$date_end <- as.Date(MHWs_Eilat_Fix_OISST$date_end,origin = "1899-12-30")
+MHWs_Eilat_Fix_OISST$start_1.5 <- as.Date(MHWs_Eilat_Fix_OISST$start_1.5,origin = "1899-12-30")
+MHWs_Eilat_Fix_OISST$end_1.5 <- as.Date(MHWs_Eilat_Fix_OISST$end_1.5,origin = "1899-12-30")
+MHWs_Eilat_Fix_OISST$start_3 <- as.Date(MHWs_Eilat_Fix_OISST$start_3,origin = "1899-12-30")
+MHWs_Eilat_Fix_OISST$end_3 <- as.Date(MHWs_Eilat_Fix_OISST$end_3,origin = "1899-12-30")
+MHWs_Eilat_Fix_OISST$Serial <- c(1:dim(MHWs_Eilat_Fix_OISST)[1])
+MHWs_Eilat_Fix_OISST <- MHWs_Eilat_Fix_OISST %>% relocate(Serial,.before = date_start)
+
+################# Moving baseline OISST ############################
+MHWs_Eilat_Moving_OISST$date_start <- as.Date(MHWs_Eilat_Moving_OISST$date_start,origin = "1899-12-30")
+MHWs_Eilat_Moving_OISST$date_end <- as.Date(MHWs_Eilat_Moving_OISST$date_end,origin = "1899-12-30")
+MHWs_Eilat_Moving_OISST$start_1.5 <- as.Date(MHWs_Eilat_Moving_OISST$start_1.5,origin = "1899-12-30")
+MHWs_Eilat_Moving_OISST$end_1.5 <- as.Date(MHWs_Eilat_Moving_OISST$end_1.5,origin = "1899-12-30")
+MHWs_Eilat_Moving_OISST$start_3 <- as.Date(MHWs_Eilat_Moving_OISST$start_3,origin = "1899-12-30")
+MHWs_Eilat_Moving_OISST$end_3 <- as.Date(MHWs_Eilat_Moving_OISST$end_3,origin = "1899-12-30")
+MHWs_Eilat_Moving_OISST$Serial <- c(1:dim(MHWs_Eilat_Moving_OISST)[1])
+MHWs_Eilat_Moving_OISST <- MHWs_Eilat_Moving_OISST %>% relocate(Serial,.before = date_start)
+MHWs_Eilat_Moving_OISST <- MHWs_Eilat_Moving_OISST[-4]
+
+
+################# Fix baseline IUI #################
+
+MHWs_Eilat_Fix_IUI$date_start <- as.Date(MHWs_Eilat_Fix_IUI$date_start,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$date_end <- as.Date(MHWs_Eilat_Fix_IUI$date_end,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$start_1.5 <- as.Date(MHWs_Eilat_Fix_IUI$start_1.5,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$end_1.5 <- as.Date(MHWs_Eilat_Fix_IUI$end_1.5,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$start_3 <- as.Date(MHWs_Eilat_Fix_IUI$start_3,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$end_3 <- as.Date(MHWs_Eilat_Fix_IUI$end_3,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$Serial <- c(1:dim(MHWs_Eilat_Fix_IUI)[1])
+MHWs_Eilat_Fix_IUI <- MHWs_Eilat_Fix_IUI %>% relocate(Serial,.before = date_start)
+
+################# Fix baseline Amazia #################
+
+MHWs_Eilat_Fix_Amazia$date_start <- as.Date(MHWs_Eilat_Fix_Amazia$date_start,origin = "1899-12-30")
+MHWs_Eilat_Fix_Amazia$date_end <- as.Date(MHWs_Eilat_Fix_Amazia$date_end,origin = "1899-12-30")
+MHWs_Eilat_Fix_Amazia$start_1.5 <- as.Date(MHWs_Eilat_Fix_Amazia$start_1.5,origin = "1899-12-30")
+MHWs_Eilat_Fix_Amazia$end_1.5 <- as.Date(MHWs_Eilat_Fix_Amazia$end_1.5,origin = "1899-12-30")
+MHWs_Eilat_Fix_Amazia$start_3 <- as.Date(MHWs_Eilat_Fix_Amazia$start_3,origin = "1899-12-30")
+MHWs_Eilat_Fix_Amazia$end_3 <- as.Date(MHWs_Eilat_Fix_Amazia$end_3,origin = "1899-12-30")
+MHWs_Eilat_Fix_Amazia$Serial <- c(1:dim(MHWs_Eilat_Fix_Amazia)[1])
+MHWs_Eilat_Fix_Amazia <- MHWs_Eilat_Fix_Amazia %>% relocate(Serial,.before = date_start)
+
+
+```
+
+
+## Calculate Each MHW summary - Need to choose dataset and change file names first!!
+```{r}
+####### Choose which dataset to work on through MHWs_Eilat ###########
+MHWs_Eilat <- MHWs_Eilat_Fix_OISST  # Set the dataset to work with
+
+#prepare the fish-MHWs summary dataframe 
+sum_heat_wave <- data.frame(fish_id=numeric(),
+                            Before_After=character(),
+                            Period=character(),
+                            activity_mean=numeric(),
+                            depth_mean=numeric(),
+                            distance_shore_mean=numeric(),
+                            activity_median=numeric(),
+                            depth_median=numeric(),
+                            distance_shore_median=numeric(),
+                            activity_sd=numeric(),
+                            depth_sd=numeric(),
+                            distance_shore_sd=numeric(),
+                            activity_sum=numeric(),
+                            depth_sum=numeric(),
+                            distance_shore_sum=numeric(),
+                            Conf_int_activity=numeric(),
+                            Conf_int_depth=numeric(),
+                            Conf_int_distance_shore=numeric(),
+                            Serial=numeric(),
+                            window_factor=numeric()
+                            )
+
+# Loop through each heatwave event
+for (event in 1:dim(MHWs_Eilat)[1]) {
+  # Extract fish IDs associated with the current MHW
+  fish_ids <- unlist(strsplit(MHWs_Eilat$Fish_IDs, ", ")[[event]])
+  
+  # Check if there are valid fish IDs
+  if(length(na.omit(fish_ids))>0)
+  {
+# Filter fish data for the widest period and annotate with before/after and period of day
+    filter_fish <- Filter_Fish(fish_ids,combined_parrotfish_df)  
+    
+    MHW_Data <- filter_fish %>%
+      filter(date>= MHWs_Eilat$start_3[event] &  date<=MHWs_Eilat$end_3[event]) %>% 
+      Before_After_MHW(MHW_Data,MHWs_Eilat$date_start[event], MHWs_Eilat$date_end[event]) %>% 
+      Add_Day_Period(MHW_Data) %>% 
+      arrange(fish_id,real_datetime)
+    
+    # Process data for different temporal window sizes
+    for (window_size in c(23,27)) {
+      start_window <-MHWs_Eilat[event,window_size]
+      end_window <-MHWs_Eilat[event,window_size+2]
+      
+      # Filter data to the specific time window
+      Windowed_MHW <- MHW_Data %>% filter(date >= start_window & date<= 
+                                                end_window)
+      
+      # Create hour bins and check for sufficient observations (> 4 observations)
+      obs_thrsh <- 4
+      Windowed_MHW$hour_bin_code <- cut(Windowed_MHW$real_datetime,breaks = "1 hour")
+      Windowed_MHW$hour_bin_code <-  paste(Windowed_MHW$fish_id,Windowed_MHW$hour_bin_code,Windowed_MHW$Period)
+      bins_count <- Windowed_MHW %>%  
+        group_by(hour_bin_code) %>% 
+        summarise(
+        non_na_activity = sum(!is.na(activity)),
+        non_na_depth = sum(!is.na(depth)),
+        non_na_distance_shore = sum(!is.na(standerized_distance))
+        )
+      bins_count_act <- bins_count[bins_count$non_na_activity > obs_thrsh,]
+      bins_count_dep <- bins_count[bins_count$non_na_depth > obs_thrsh,]
+      bins_count_dis <- bins_count[bins_count$non_na_distance_shore > obs_thrsh,]
+      
+      # Calculate summary statistics for activity
+      temp_sum_heat_wave_act <- Windowed_MHW %>%
+        filter(hour_bin_code %in% bins_count_act$hour_bin_code)%>%
+        group_by(fish_id,Before_After,Period) %>%
+        summarise_at(vars(activity),funs(mean(.,na.rm=T),
+                                 median(.,na.rm=T),
+                                 sd(.,na.rm=T),sum(!is.na(.)))) %>%
+        mutate(Conf_int_activity=sd/sqrt(sum) * qt(p=0.975,df=sum-1))
+      colnames(temp_sum_heat_wave_act)[4:7] <- paste("activity",colnames(temp_sum_heat_wave_act)[4:7],sep = "_")
+      
+      # Calculate summary statistics for depth
+      temp_sum_heat_wave_dep <- Windowed_MHW %>%
+        filter(hour_bin_code %in% bins_count_dep$hour_bin_code)%>%
+        group_by(fish_id,Before_After,Period) %>%
+        summarise_at(vars(depth),funs(mean(.,na.rm=T),
+                                  median(.,na.rm=T),
+                                  sd(.,na.rm=T),sum(!is.na(.)))) %>%
+        mutate(Conf_int_depth=sd/sqrt(sum) * qt(p=0.975,df=sum-1))
+      colnames(temp_sum_heat_wave_dep)[4:7] <- paste("depth",colnames(temp_sum_heat_wave_dep)[4:7],sep = "_")
+
+      # Calculate summary statistics for distance to shore
+      temp_sum_heat_wave_dis <- Windowed_MHW %>% 
+        filter(hour_bin_code %in% bins_count_dis$hour_bin_code) %>%
+        group_by(fish_id,Before_After,Period) %>%
+        summarise_at(vars(standerized_distance),funs(mean(.,na.rm=T),
+                                           median(.,na.rm=T),
+                                           sd(.,na.rm=T),sum(!is.na(.)))) %>%
+        mutate(Conf_int_distance_shore=sd/sqrt(sum) * qt(p=0.975,df=sum-1))
+      colnames(temp_sum_heat_wave_dis)[4:7] <- paste("distance_shore",colnames(temp_sum_heat_wave_dis)[4:7],sep = "_")
+      
+     # Merge summary statistics for all metrics
+      temp_sum_heat_wave <- conditional_merge(temp_sum_heat_wave_dis,temp_sum_heat_wave_dep,c("fish_id","Before_After","Period"))
+      temp_sum_heat_wave <- conditional_merge(temp_sum_heat_wave,temp_sum_heat_wave_act,c("fish_id","Before_After","Period"))
+      temp_sum_heat_wave$Serial <- MHWs_Eilat$Serial[event]
+      temp_sum_heat_wave$window_factor <- ifelse(window_size == 23, 1.5,3)
+      temp_sum_heat_wave <- Fill_In_temp_sum_heat_wave(colnames(sum_heat_wave),temp_sum_heat_wave)
+      
+      # Append the processed data to the main summary dataframe
+      sum_heat_wave <- rbind(sum_heat_wave,temp_sum_heat_wave)  
+      
+    }   
+  }
+}
+
+# Reorganize columns in the summary dataframe
+sum_heat_wave <- sum_heat_wave %>% relocate(Serial,.before = fish_id)
+sum_heat_wave <- sum_heat_wave %>% relocate(window_factor,.before = fish_id)
+
+############ Save the summary data 
+############ Choose the name of the basedataset and def #############
+write.csv(sum_heat_wave,paste("Red Sea/Results/Individual Heatwaves/Fish_heatwave_data_Amazia_Fixbase_MHW_Stage_Avg",Sys.Date(),".csv"))
+
+# Nest the data by Serial and window_factor
+nest_hw <- sum_heat_wave %>% 
+  ungroup() %>%
+  nest_by(Serial,window_factor)
+
+# Save the nested data
+saveRDS(nest_hw,paste("Red Sea/Results/Individual Heatwaves/Nested_heatwaves_Amazia_Fixbase_MHW_Stage_Avg",Sys.Date(),".RDS"))
+```
+
+
+## Calculate means before and after the heat wave - long : Continue to the MHW Summary section
+```{r}
+# Initialize an empty dataframe to store the results
+MHWs_stat <- data.frame(
+  fish_id=numeric(), # ID of the fish
+  Serial = numeric(),              # Serial number for the heatwave event
+  window_factor = numeric(),       # Factor indicating the analysis window size
+  Period_of_day = character(),     # Period of the day (e.g., Dawn , Day)
+  ln_activity_ratio = numeric(),   # Logarithmic ratio of activity levels between stages
+  delta_depth = numeric(),         # Change in depth between stages
+  delta_distance = numeric(),      # Change in distance from shore between stages
+  Stage_period = character()       # Describes the stage comparison (e.g., "MHW : Before")
+)
+
+# Iterate over each heatwave event
+for (event_calc in 1:dim(nest_hw)[1]) {
+  temp_heat_wave <- nest_hw$data[[event_calc]]  # Extract data for the current event
+  # If contains date
+  # temp_heat_wave <- temp_heat_wave %>%
+  #   rename("activity" = "activity_mean",
+  #          "depth" = "depth_mean",
+  #          "distance_shore" = "distance_shore_mean") %>%
+  #   group_by(fish_id,Before_After,Check_period)
+  # # %>%
+  #   summarise_at(vars(activity,depth,distance_shore),funs(mean(.,na.rm=T), median(.,na.rm=T),
+  #                                                       sd(.,na.rm=T),n()))
+  #
+  
+  #With period
+  # Iterate over each unique fish ID in the heatwave data
+  for (fish in unique(temp_heat_wave$fish_id)) {
+    temp_fish <- temp_heat_wave %>% filter(fish_id==fish) # Filter data for the current fish
+    # Iterate over each period of the day
+    for (period in unique(temp_heat_wave$Period)) {
+      
+      temp_period <- temp_fish %>% filter(Period==period) # Filter data for the current period
+      
+      # Initialize a temporary row for storing results
+      temp_row <- data.frame(
+                  fish_id=rep(fish,3),# Repeat fish ID
+        Serial = rep(nest_hw$Serial[[event_calc]], 3),   # Repeat serial for current event
+        window_factor = rep(nest_hw$window_factor[[event_calc]], 3), # Repeat window factor
+        Period_of_day = rep(period, 3),                 # Repeat current period
+        ln_activity_ratio = rep(NA, 3),                 # Placeholder for activity ratio
+        delta_depth = rep(NA, 3),                       # Placeholder for depth change
+        delta_distance = rep(NA, 3),                    # Placeholder for distance change
+        Stage_period = rep(NA, 3)                       # Placeholder for stage comparison label
+      )
+      
+      uniqe_stages <- unique(temp_period$Before_After) # Get unique stages (e.g., "Before", "MHW", "After")
+      row_i <- 1 # Initialize row index for temporary row
+      
+      # Check and calculate metrics for "MHW : Before" stage comparison
+                  if(all(c("MHW","Before") %in% uniqe_stages))
+                  {
+                    temp_row$ln_activity_ratio[row_i] <- log(temp_period$activity_mean[temp_period$Before_After=="MHW"] /temp_period$activity_mean[temp_period$Before_After=="Before"])
+                    temp_row$delta_depth[row_i] <- temp_period$depth_mean[temp_period$Before_After=="MHW"] - temp_period$depth_mean[temp_period$Before_After=="Before"]
+                    temp_row$delta_distance[row_i] <- abs(temp_period$distance_shore_mean[temp_period$Before_After=="MHW"]- temp_period$distance_shore_mean[temp_period$Before_After=="Before"])
+                    temp_row$Stage_period[row_i] <- "MHW : Before" # Label the stage comparison
+                    row_i <- row_i+1 # Increment row index
+                  }
+      
+      # Check and calculate metrics for "After : MHW" stage comparison
+                  if(all(c("After","MHW") %in% uniqe_stages))
+                  {
+                     temp_row$ln_activity_ratio[row_i] <- log(temp_period$activity_mean[temp_period$Before_After=="After"]/temp_period$activity_mean[temp_period$Before_After=="MHW"])
+                     temp_row$delta_depth[row_i] <- temp_period$depth_mean[temp_period$Before_After=="After"] - temp_period$depth_mean[temp_period$Before_After=="MHW"]
+                     temp_row$delta_distance[row_i] <-
+                     abs(temp_period$distance_shore_mean[temp_period$Before_After=="After"] - temp_period$distance_shore_mean[temp_period$Before_After=="MHW"])
+                     temp_row$Stage_period[row_i] <- "After : MHW"
+                    row_i <- row_i+1
+                  }
+      
+       # Check and calculate metrics for "After : Before" stage comparison
+                  if(all(c("After","Before") %in% uniqe_stages))
+                  {
+                    temp_row$ln_activity_ratio[row_i] <- log(temp_period$activity_mean[temp_period$Before_After=="After"]/temp_period$activity_mean[temp_period$Before_After=="Before"])
+                    temp_row$delta_depth[row_i] <- temp_period$depth_mean[temp_period$Before_After=="After"] - temp_period$depth_mean[temp_period$Before_After=="Before"]
+                    temp_row$delta_distance[row_i] <-
+                    abs(temp_period$distance_shore_mean[temp_period$Before_After=="After"] - temp_period$distance_shore_mean[temp_period$Before_After=="Before"])
+                    temp_row$Stage_period[row_i] <- "After : Before"
+                  }
+      # Append the temporary row to the main results dataframe
+      MHWs_stat <- rbind(MHWs_stat,temp_row)
+    }
+  }
+}
+
+# Remove rows where all metrics (activity, depth, distance) are NA
+MHWs_stat <- MHWs_stat %>% filter(!(is.na(ln_activity_ratio) & is.na(delta_depth) & is.na(delta_distance)))
+
+# Merge with heatwave metadata
+############ Choose the name of the basedataset and def #############
+MHWs_stat <- merge(MHWs_stat,MHWs_Eilat,by = "Serial") %>%  select(-Fish_IDs)
+
+# Add species information from the metadata
+stat_tags_metadata_parrot <- tags_metadata_parrot %>% 
+  select(fish_id,species) 
+MHWs_stat <- distinct(merge(MHWs_stat,stat_tags_metadata_parrot,by = "fish_id"))
+
+# Save the final results to CSV 
+############ Choose the name of the basedataset and def #############
+write.csv(MHWs_stat,paste("Red Sea/Results/Individual Heatwaves/Eilat_MHWs_Stat_Amazia_Fixbase_MHW_Stage_Avg_long",Sys.Date(),".csv"))
+```
+
+
+
+## Extract Fish temp preference from FishBase
+```{r}
+for (species in unique(tags_metadata_parrot$species)) {
+  if (!is.na(species)) {
+    min <- estimate(species)$TempPrefMin
+      max <- estimate(species)$TempPrefMax
+      mean <- estimate(species)$TempPrefMean
+      tags_metadata_parrot$minTemp[tags_metadata_parrot$species==species] <- min
+      tags_metadata_parrot$maxTemp[tags_metadata_parrot$species==species] <- max
+      tags_metadata_parrot$meanTemp[tags_metadata_parrot$species==species] <- mean
+  }
+      
+}
+
+```
+
+
+
+
+
+## Compare IUI temp and TBR
+```{r}
+sst_IUI_10_min <- read.csv("Red Sea/Eilat climetology/IUI/SST_Eilat_IUI_10min.csv")
+TBR_data <- read.csv("Red Sea/TBR data/All TBR sensor data - All TB acoustic files.csv")
+# Formatting SST IUI 10 min
+sst_IUI_10_min$DateTime <- as.POSIXct(sst_IUI_10_min$DateTime,format="%d/%m/%Y %H:%M:%S",tz = "Asia/Jerusalem")
+sst_IUI_10_min <- sst_IUI_10_min %>% select(-Comments)
+# Formatting TBR_Meta
+TBR_metadata <- read.csv("Red Sea/TBR data/all stations from EPIC - Yuval.csv")
+TBR_metadata <- TBR_metadata %>% select(rec,rec_z,period_start)
+TBR_metadata <- TBR_metadata %>% rename("Receiver"="rec")
+TBR_metadata <- TBR_metadata[!duplicated(TBR_metadata),]
+TBR_metadata$rec_z <- ifelse(TBR_metadata$rec_z=="",NA,TBR_metadata$rec_z)
+TBR_metadata <- na.omit(TBR_metadata)
+TBR_metadata$period_start <- as.Date(TBR_metadata$period_start,format = "%d/%m/%Y")
+TBR_metadata <- TBR_metadata[with(TBR_metadata,order(Receiver,period_start)),]
+
+# Formatting TBR_data
+TBR_data$Date.and.Time_2GMT <- as.POSIXct(TBR_data$Date.and.Time..UTC.,format="%Y-%m-%dT%H:%M:%S",tz = "UTC")
+TBR_data$Date.and.Time_2GMT <- with_tz(TBR_data$Date.and.Time_2GMT,tzone="Asia/Jerusalem")
+TBR_data <- TBR_data %>% select(Date.and.Time..UTC.,Date.and.Time_2GMT,Temperature..degC.,Receiver)
+dates <- c(unique(fish_df$date),unique(parrotfish_data$date))
+TBR_data$date <- as.Date(format(TBR_data$Date.and.Time_2GMT),tz="Asia/Jerusalem")
+TBR_data <- TBR_data %>% filter(date %in% dates)
+TBR_data$Serial <- 1:nrow(TBR_data)
+TBR_data$depth <- NA
+
+#Merging depth to TBR_data - stated here and continued manually in excel using xlookup
+for (rec in unique(TBR_metadata$Receiver)) {
+  temp_rec_meta <- TBR_metadata %>% filter(Receiver==rec)
+  temp_rec_data <- TBR_data %>% filter(Receiver==rec)
+  temp_rec_data <- temp_rec_data %>%
+    arrange(Date.and.Time_2GMT) %>% 
+    mutate(time_diff=c(NA,diff(Date.and.Time_2GMT))) %>%
+    filter(time_diff==600)
+  wb <- createWorkbook()
+  addWorksheet(wb,"temp_rec_data")
+  writeData(wb,"temp_rec_data",temp_rec_data)
+  addWorksheet(wb,"temp_rec_meta")
+  writeData(wb,"temp_rec_meta",temp_rec_meta)
+  saveWorkbook(wb,paste("Red Sea/TBR data/Depth assigment/",rec,".xlsx"),overwrite = T)
+
+  }
+
+## Continue after Excel
+file_list <- list.files(path = "Red Sea/TBR data/Depth assigment/", full.names = TRUE)
+data_list <- list()
+for (file_num in 1:length(file_list)) {
+  data_list[[file_num]] <- read.xlsx(file_list[file_num],sheet="temp_rec_data")
+}
+data_list <- bind_rows(data_list)
+data_list <- data_list %>% rename("DateTime"="Date.and.Time_2GMT")
+data_list$DateTime <- as.POSIXct(data_list$Date.and.Time..UTC.,format="%Y-%m-%dT%H:%M:%S",tz = "UTC")
+data_list$DateTime <- with_tz(data_list$DateTime,tzone="Asia/Jerusalem")
+
+data_list <- merge(data_list,sst_IUI_10_min,by="DateTime")
+write.csv(data_list,"Red Sea/TBR data/TBR_depth_SST.csv")
+
+## Checking the deepest TBR
+data_list_deep <-data_list %>% filter(depth==7.6) 
+ggplot(data_list_deep)+
+  geom_point(aes(x=DateTime,y=Temperature..degC.))
+
+ggplot(data_list_deep)+
+  geom_point(aes(x=Average.temp,y=Temperature..degC.))
+```
+
+
+## Estimate thermal niche edges - Bioblitz till 2023 based
+```{r}
+surveys_data <- read.csv("Red Sea/May surveys data/Full_data.csv")
+species_list <- c("Chlorurus sordidus","Scarus fuscopurpureus","Scarus niger","Chlorurus gibbus")
+surveys_data <- surveys_data %>% filter(Species %in% species_list)
+surveys_data$Date <- as.Date(surveys_data$Date)
+survey_temps <- read.xlsx("Red Sea/May surveys data/Temps.xlsx")
+survey_temps$Date <- as.Date(survey_temps$Date,origin = "1899-12-30") ## IUI meteorological 24 hours
+surveys_data <- merge(surveys_data,survey_temps,by="Date")
+temp_range <- data.frame(Species=unique(surveys_data$Species),
+                         max_t=NA,
+                         min_t=NA)
+for (specie in unique(surveys_data$Species)) {
+  temp_specie <- surveys_data %>% filter(Species==specie)
+  temp_range$max_t[temp_range$Species==specie] <- max(temp_specie$Temp.max)
+  temp_range$min_t[temp_range$Species==specie] <- min(temp_specie$Temp.min)
+}
+```
+
+## GAM
+### Data exploration
+```{r}
+### depth/activity/distance ~ time of day + Before.After + intensity mean/cummelative + random(fish_id) +random (MHW_ID)
+
+# Generate an exploratory report for the combined dataset
+DataExplorer::create_report(MHWs_combined_data)
+
+# Arrange data and factor levels for analysis
+
+MHWs_combined_data <- MHWs_combined_data %>% arrange(fish_id,real_datetime)
+MHWs_combined_data$Before_After <- factor(MHWs_combined_data$Before_After, levels = c("Before","MHW","After"))
+
+###### Activity Analysis
+# Filter and clean data for activity-related variables
+act_fish_df <- MHWs_combined_data %>%
+  select(fish_id,real_datetime,activity,Before_After,Serial) %>% 
+  na.omit()
+
+# Count activity observations per fish and MHW event
+act_counts_fish <- act_fish_df %>% 
+  count(fish_id,Serial,Before_After)
+
+# Visualize activity levels using boxplots, faceted by fish ID
+ggplot(act_fish_df,aes(x=Before_After,y=activity))+
+  geom_boxplot()+
+  facet_wrap(~fish_id)
+# Inspect distribution of activity using histograms
+hist(act_fish_df$activity) # Overall distribution
+hist(act_fish_df$activity[act_fish_df$Before_After == "Before"]) # Before MHW
+hist(act_fish_df$activity[act_fish_df$Before_After == "MHW"]) # During MHW
+hist(act_fish_df$activity[act_fish_df$Before_After == "After"]) # After MHW
+# Note: A Tweedie distribution may be suitable for modeling this variable
+
+###### Depth Analysis
+# Filter and clean data for depth-related variablesdep_fish_df <- MHWs_combined_data %>%
+  select(fish_id,real_datetime,depth,Before_After,Serial) %>% 
+  na.omit()
+  
+# Count depth observations per fish and MHW event
+dep_counts_fish <- dep_fish_df %>% 
+  count(fish_id,Serial,Before_After)
+
+# Visualize depth levels using boxplots, faceted by fish ID
+ggplot(dep_fish_df,aes(x=Before_After,y=depth))+
+  geom_boxplot()+
+  facet_wrap(~fish_id)
+
+# Inspect distribution of depth using histograms
+hist(dep_fish_df$depth) # Overall distribution
+hist(dep_fish_df$depth[dep_fish_df$Before_After == "Before"]) # Before MHW
+hist(dep_fish_df$depth[dep_fish_df$Before_After == "MHW"]) # During MHW
+hist(dep_fish_df$depth[dep_fish_df$Before_After == "After"]) # After MHW
+# Note: Depth appears skewed and may require transformation
+
+##### Distance from Shore Analysis
+# Filter and clean data for distance-related variables
+dis_fish_df <- MHWs_combined_data %>%
+  select(fish_id,real_datetime,distance_shore,Before_After,Serial) %>% 
+  na.omit()
+
+# Count distance observations per fish and MHW event
+dis_counts_fish <- dis_fish_df %>% 
+  count(fish_id,Serial,Before_After)
+
+# Inspect distribution of distance from shore using histograms
+hist(dis_fish_df$distance_shore) # Overall distribution
+hist(dis_fish_df$distance_shore[dis_fish_df$Before_After == "Before"]) # Before MHW
+hist(dis_fish_df$distance_shore[dis_fish_df$Before_After == "MHW"]) # During MHW
+hist(dis_fish_df$distance_shore[dis_fish_df$Before_After == "After"]) # After MHW
+# Note: Need centering and scaling this variable for modeling
+
+#### Collinearity Check
+# Select numerical predictors for visualizatio
+col_num_vis <- MHWs_combined_data %>% select(activity,depth,distance_shore,intensity_mean,intensity_max,intensity_cumulative,duration,rate_onset,rate_decline)
+
+# Generate pairwise scatterplots to assess collinearity
+pairs(col_num_vis,cex.labels = 1)
+
+```
+### Find the three top MHWs and isolated MHWs
+```{r}
+names(MHWs_Eilat) <- make.names(names(MHWs_Eilat), unique = TRUE)
+
+# Filter MHWs that have fish IDs (i.e., not NA)
+MHWs_Eilat_filtered <- MHWs_Eilat %>%
+  filter(!is.na(Fish_IDs))
+
+
+# Define the categories to find top 3 values
+categories <- c("intensity_max", "intensity_mean", "intensity_cumulative", 
+                "intensity_max_abs", "rate_onset", "duration")
+
+# Create a new dataframe with top 3 MHWs per category
+top_MHWs <- bind_rows(
+  lapply(categories, function(cat) {
+    MHWs_Eilat_filtered %>%
+      arrange(desc(!!sym(cat))) %>%  # Sort by category in descending order
+      slice_head(n = 3) %>%          # Select top 3
+      mutate(category_top = cat)         # Add category name
+  })
+)
+
+# Filter for 'isolated_MHW' where reliability level is 'T' in levels 2 or 3
+isolated_MHWs <- MHWs_Eilat_filtered %>%
+  filter(reliabaility.level.2=="T" & reliabaility.level.3=="T") %>%
+  mutate(category_top = "isolated_MHW")  # Assign "isolated_MHW" as the category
+
+# Combine 'isolated_MHW' with the top MHWs for other categories
+top_MHWs <- bind_rows(top_MHWs, isolated_MHWs)
+
+# Relocate the 'category_top' column to the front (before 'Serial')
+top_MHWs <- top_MHWs %>% relocate(category_top,.before = Serial)
+
+# Nest the dataframe by 'category_top'
+top_MHWs <- top_MHWs %>% nest_by(category_top)
+
+saveRDS(top_MHWs,"Red Sea/Results/Models/top_MHWs_OISST_Fix.rds")
+```
+
+
+### Create dataframe for GAM and daily curves - Need to choose dataset and change file names first!!
+```{r}
+####### choose which dataset to work on through MHWs_Eilat  ###########
+MHWs_Eilat <- MHWs_Eilat_Moving_OISST
+
+MHWs_fish_data <- data.frame()
+for (event in 1:dim(MHWs_Eilat)[1]) {
+  #get the fish id relates to the specific MHWs
+  fish_ids <- unlist(strsplit(MHWs_Eilat$Fish_IDs, ", ")[[event]])
+  #Check if there are any fish
+  if(length(na.omit(fish_ids))>0)
+  {
+    #filter the fish to the widest period, add before.after and period of day
+    #using the right database
+    filter_fish <- Filter_Fish(fish_ids,combined_parrotfish_df)  
+    ####### takes the longer timespan, 3 times before and after the MHW #####
+    MHW_Data <- filter_fish %>% filter(date>= MHWs_Eilat$start_3[event] & date<= 
+                                              MHWs_Eilat$end_3[event])
+    MHW_Data <- Before_After_MHW(MHW_Data,MHWs_Eilat$date_start[event], MHWs_Eilat$date_end[event])
+    
+    #remove colums of fish ids
+    temp_MHWs_Eilat <- MHWs_Eilat[-19]
+    MHW_Data <- MHW_Data %>% arrange(fish_id,real_datetime)
+    MHW_Data$Serial <- MHWs_Eilat$Serial[event]
+    MHW_Data <- merge(MHW_Data,temp_MHWs_Eilat,by="Serial")
+    
+    #standerized procedure
+     for (fish in unique(MHW_Data$fish_id)) {
+         avg_act <- mean(MHW_Data$activity[MHW_Data$fish_id==fish],na.rm = T)
+         avg_dep <- mean(MHW_Data$depth[MHW_Data$fish_id==fish],na.rm = T)
+         avg_dis <- mean(MHW_Data$distance_shore[MHW_Data$fish_id==fish],na.rm = T)
+         
+         MHW_Data$activity_std[MHW_Data$fish_id==fish] <- MHW_Data$activity[MHW_Data$fish_id==fish]- avg_act
+         MHW_Data$activity_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$activity[MHW_Data$fish_id==fish]- avg_act)/sd(MHW_Data$activity[MHW_Data$fish_id==fish],na.rm = T)
+         MHW_Data$depth_std[MHW_Data$fish_id==fish] <- MHW_Data$depth[MHW_Data$fish_id==fish]- avg_dep
+         MHW_Data$depth_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$depth[MHW_Data$fish_id==fish]- avg_dep)/sd(MHW_Data$depth[MHW_Data$fish_id==fish],na.rm = T)
+         MHW_Data$distance_std[MHW_Data$fish_id==fish] <- MHW_Data$distance_shore[MHW_Data$fish_id==fish]- avg_dis
+         MHW_Data$distance_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$distance_shore[MHW_Data$fish_id==fish]- avg_dis)/sd(MHW_Data$distance_shore[MHW_Data$fish_id==fish],na.rm = T)
+     }
+    
+   
+    MHWs_fish_data <- rbind(MHWs_fish_data,MHW_Data)  
+  }
+}
+
+# Create Standerize distance shore
+MHWs_fish_data <- MHWs_fish_data %>% 
+  group_by(fish_id) %>% 
+  mutate(centered_distance = distance_shore-mean(distance_shore),
+         standerized_distance=centered_distance/sd(distance_shore))
+
+# Create a column with the time of the day
+MHWs_fish_data$TimeOfDay <- as.POSIXct(format(MHWs_fish_data$real_datetime,format = "%H:%M:%S"),format = "%H:%M:%S")
+
+# Convert time of day to decimal format for modeling
+MHWs_fish_data$DecimalTimeOfDay <- time_to_decimal(MHWs_fish_data$TimeOfDay) 
+
+# Convert species column to factor
+MHWs_fish_data$species <-as.factor(MHWs_fish_data$species) 
+
+# Convert Before_after to factor and create new factor for combined MHW serial and fish id
+MHWs_fish_data$Serial_fish_id <- paste(MHWs_fish_data$Serial,MHWs_fish_data$fish_id,sep="_")
+MHWs_fish_data$Serial_fish_id <- as.factor(MHWs_fish_data$Serial_fish_id)
+MHWs_fish_data$Before_After <- as.factor(MHWs_fish_data$Before_After)
+
+# Ensure date columns are in POSIXct format
+MHWs_Eilat$date_start <- as.POSIXct(MHWs_Eilat$date_start)
+MHWs_Eilat$date_end <- as.POSIXct(MHWs_Eilat$date_end)
+  
+```
+
+### Disatnce statistical tests
+```{r}
+MHW_daily_distance_df <- MHWs_fish_data 
+MHW_daily_distance_df <- MHW_daily_distance_df %>%
+  mutate(hour = hour(real_datetime)) %>%      # Extract hour
+  relocate(hour,.after = date)
+
+MHW_daily_distance_df <- MHW_daily_distance_df %>%
+  group_by(Serial_fish_id, date) %>%
+  filter(!all(is.na(distance_shore))) %>%
+  summarise(
+    # Max daily displacement: median of the top 10% - median of the bottom 10%
+    max_daily_displacement = {
+      sorted_distances <- sort(distance_shore, na.last = NA)
+      n <- length(sorted_distances)
+      top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
+      bottom_10_percent <- sorted_distances[1:floor(0.1 * n)]
+      abs(median(top_10_percent, na.rm = TRUE) - median(bottom_10_percent, na.rm = TRUE))
+    },
+
+    # Night counts (hour between 0:00 and 5:00)
+    night_count = sum(hour >= 0 & hour < 5),
+
+    # Night displacement for 5
+    night_median_5 = if_else(
+      night_count > 5,
+      median(distance_shore[hour >= 0 & hour < 5], na.rm = TRUE),
+      NA_real_
+    ),
+    night_displacement_5 =
+      {
+      sorted_distances <- sort(distance_shore, na.last = NA)
+      n <- length(sorted_distances)
+      top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
+      abs(top_10_percent - night_median_5)
+      }
+    ,
+
+    # Night displacement for 10
+    night_median_10 = if_else(
+      night_count > 10,
+      median(distance_shore[hour >= 0 & hour < 5], na.rm = TRUE),
+      NA_real_
+    ),
+    night_displacement_10 = {
+      sorted_distances <- sort(distance_shore, na.last = NA)
+      n <- length(sorted_distances)
+      top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
+      abs(top_10_percent - night_median_10)
+      }
+    ,
+
+    # Night displacement for 15
+    night_median_15 = if_else(
+      night_count > 15,
+      median(distance_shore[hour >= 0 & hour < 5], na.rm = TRUE),
+      NA_real_
+    ),
+    night_displacement_15 = {
+      sorted_distances <- sort(distance_shore, na.last = NA)
+      n <- length(sorted_distances)
+      top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
+      abs(top_10_percent - night_median_15)
+      },
+
+    # Additional columns (unchanged)
+    Serial=first(Serial),
+    size = first(size),
+    species = first(species),
+    Before_After = first(Before_After),
+    date_start = first(date_start),
+    date_peak = first(date_peak),
+    date_end = first(date_end),
+    duration = first(duration),
+    intensity_mean = first(intensity_mean),
+    intensity_max = first(intensity_max),
+    intensity_var = first(intensity_var),
+    intensity_cumulative = first(intensity_cumulative),
+    intensity_mean_relThresh = first(intensity_mean_relThresh),
+    intensity_max_relThresh = first(intensity_max_relThresh),
+    intensity_var_relThresh = first(intensity_var_relThresh),
+    intensity_mean_abs = first(intensity_mean_abs),
+    intensity_max_abs = first(intensity_max_abs),
+    intensity_var_abs = first(intensity_var_abs),
+    rate_onset = first(rate_onset),
+    rate_decline = first(rate_decline),
+    Category = first(Category),
+    start_1.5 = first(start_1.5),
+    reliability_level = first(reliabaility.level),
+    end_1.5 = first(end_1.5),
+    reliability_level_1 = first(reliabaility.level.1),
+    start_3 = first(start_3),
+    reliability_level_2 = first(reliabaility.level.2),
+    end_3 = first(end_3),
+    reliability_level_3 = first(reliabaility.level.3)
+  ) %>%
+  ungroup()
+
+
+
+
+hist(MHW_daily_distance_df$max_daily_displacement)
+hist(MHW_daily_distance_df$night_displacement_5)
+hist(MHW_daily_distance_df$night_displacement_10)
+hist(MHW_daily_distance_df$night_displacement_15)
+hist(MHW_daily_distance_df$max_daily_displacement[MHW_daily_distance_df$Before_After=="Before"])
+hist(MHW_daily_distance_df$max_daily_displacement[MHW_daily_distance_df$Before_After=="MHW"])
+hist(MHW_daily_distance_df$max_daily_displacement[MHW_daily_distance_df$Before_After=="After"])
+
+# Count the number of appearances of each fish in each category
+paired_fish <- MHW_daily_distance_df %>%
+  group_by(Serial_fish_id, Before_After) %>%
+  summarise(count = n()) %>%
+  spread(Before_After, count) 
+# Find the minimum count for each fish
+min_count <- paired_fish %>%
+  mutate(min_count = min(Before, MHW, After)) %>%
+  select(Serial_fish_id, min_count)
+# Merge the minimum count back to the original dataset
+balanced_fish_data <- paired_fish %>%
+  left_join(min_count, by = "Serial_fish_id") %>% 
+  select(Serial_fish_id,min_count)
+
+# Join balanced_fish_data with MHW_daily_distance_df to get min_count per Serial_fish_id and Before_After
+balanced_data <- MHW_daily_distance_df %>%
+  left_join(balanced_fish_data, by = "Serial_fish_id")
+
+#############try to figure out how to sample the right amount for each group############
+
+
+
+
+
+```
+
+
+### Depth Models 
+```{r}
+# Log-transform depth to address skewness in distribution
+MHWs_fish_data$log_depth <- log(MHWs_fish_data$depth + 1) 
+hist(MHWs_fish_data$log_depth) # Check distribution post-transformation
+
+# Remove Serial_fish_id levels that have only NA values for depth
+MHWs_fish_data_dep_filtered <- MHWs_fish_data %>%
+  filter(!is.na(log_depth))
+unique(MHWs_fish_data_dep_filtered$Serial_fish_id)
+# Create the histogram plot with facets for each Serial_fish_id
+ggplot(MHWs_fish_data_dep_filtered, aes(x = log_depth)) +
+  geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black", alpha = 0.7) +
+  facet_wrap(~ Serial_fish_id, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "Histogram of log depth for Each Serial Fish ID",
+    x = "Log Depth",
+    y = "Count"
+  ) +
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+# Create the timeline plot with facets for each Serial_fish_id
+ggplot(MHWs_fish_data_dep_filtered, aes(x=real_datetime,y = depth)) +
+  geom_point(fill = "skyblue", color = "black", alpha = 0.7) +
+  facet_wrap(~ Serial_fish_id, scales = "free") +
+  theme_minimal() +
+  scale_y_reverse()+
+  labs(
+    title = "Time series of depth for Each Serial Fish ID",
+    x = "Time",
+    y = "Depth"
+  ) +
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) 
+  
+results_depths <- automate_model_selection(MHWs_fish_data_dep_filtered, response_var = "log_depth", family = gaussian())
+
+appraise(results_depths$best_model)
+
+smooth_values <- plot_smooths(results_depths$best_model, series = DecimalTimeOfDay, comparison = Before_After)
+
+smooth_values$data$log_depth <- exp(smooth_values$data$log_depth) - 1
+smooth_values$data$CI_upper <- exp(smooth_values$data$CI_upper) - 1
+smooth_values$data$CI_lower <- exp(smooth_values$data$CI_lower) - 1
+
+smooth_values+
+  theme(legend.position = "top") +
+  theme_bw() +
+  scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+  scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+  # Optional: Adjust transparency of the CI fill (alpha)
+  theme(legend.position = "top")+
+  scale_y_reverse()+
+  ylab("Depth [m]")+
+  xlab("Time of day")
+
+saveRDS(results_depths,"Red Sea/Results/Models/Depth_Models_OISST_detrended_31mm.RDS")
+
+```
+### Activity models
+```{r}
+
+hist(MHWs_fish_data$activity) # Check activity distribution 
+# Remove Serial_fish_id levels that have only NA values for standerized_distance
+MHWs_fish_data_act_filtered <- MHWs_fish_data %>%
+  filter(!is.na(activity))
+unique(MHWs_fish_data_act_filtered$Serial_fish_id)
+MHWs_fish_data_act_filtered %>% 
+  group_by(Serial_fish_id) %>% 
+  summarise(n=n())
+# Create the histogram plot with facets for each Serial_fish_id
+ggplot(MHWs_fish_data_act_filtered, aes(x = activity)) +
+  geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black", alpha = 0.7) +
+  facet_wrap(~ Serial_fish_id, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "Histogram of Activity for Each Serial Fish ID",
+      x = "Activity",
+    y = "Count"
+  ) +
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+# Create the timeline plot with facets for each Serial_fish_id
+ggplot(MHWs_fish_data_act_filtered, aes(x = real_datetime, y = activity)) +
+  # Add red background for MHW periods
+  geom_rect(data = MHWs_Eilat, 
+            aes(xmin = date_start, xmax = date_end, ymin = -Inf, ymax = Inf),
+            fill = "red", alpha = 0.2, inherit.aes = FALSE) + 
+  # Add scatter plot of fish activity
+  geom_point(fill = "skyblue", color = "black", alpha = 0.7) +
+  # Facet by Serial_fish_id
+  facet_wrap(~ Serial_fish_id, scales = "free") +
+  scale_x_datetime(date_labels = "%d %b %Y") +  # Formats as "01 Jan 2024"
+  # Minimal theme
+  theme_minimal() +
+  # Labels
+  labs(
+    title = "Time series of Activity with Marine Heatwave Events",
+    x = "Time",
+    y = "Activity"
+  ) +
+  # Adjust text appearance
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+results_activity <- automate_model_selection(MHWs_fish_data_act_filtered, response_var = "activity", family = "tw")
+
+#diagnsotic plots for the winning
+appraise(results_activity$best_model)
+
+plot_smooths(results_activity$best_model, series = DecimalTimeOfDay, comparison = Before_After) + 
+  theme(legend.position = "top") + 
+  theme_bw() +
+  scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) + 
+  scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+  # Optional: Adjust transparency of the CI fill (alpha)
+  theme(legend.position = "top")
+
+
+
+saveRDS(results_activity,"Red Sea/Results/Models/Act_Models_OISST_detrended_31mm.RDS")
+
+
+```
+
+### Distance models
+```{r}
+
+# Filter unique Serial_fish_id with non-NA distance data
+unique_fish_with_distance <- MHWs_fish_data %>%
+  filter(!is.na(distance_shore)) %>%  # Keep only rows with non-NA distance
+  distinct(Serial_fish_id)        # Get unique Serial_fish_id
+print(unique_fish_with_distance)
+
+# Create a column with the time of the day
+MHWs_fish_data$TimeOfDay <- as.POSIXct(format(MHWs_fish_data$real_datetime,format = "%H:%M:%S"),format = "%H:%M:%S")
+
+# Convert time of day to decimal format for modeling
+MHWs_fish_data$DecimalTimeOfDay <- time_to_decimal(MHWs_fish_data$TimeOfDay) 
+
+# Convert Before_after to factor and create new factor for combined MHW serial and fish id
+MHWs_fish_data$Serial_fish_id <- paste(MHWs_fish_data$Serial,MHWs_fish_data$fish_id,sep="_")
+MHWs_fish_data$Serial_fish_id <- as.factor(MHWs_fish_data$Serial_fish_id)
+MHWs_fish_data$Before_After <- as.factor(MHWs_fish_data$Before_After)
+
+hist(MHWs_fish_data$standerized_distance) # Check distance distribution 
+
+# Remove Serial_fish_id levels that have only NA values for standerized_distance
+MHWs_fish_data_distance_filtered <- MHWs_fish_data %>%
+  filter(!is.na(standerized_distance))
+# Create the histogram plot with facets for each Serial_fish_id
+ggplot(MHWs_fish_data_distance_filtered, aes(x = standerized_distance)) +
+  geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black", alpha = 0.7) +
+  facet_wrap(~ Serial_fish_id, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "Histogram of Standardized Distance for Each Serial Fish ID",
+    x = "Standardized Distance",
+    y = "Count"
+  ) +
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+# Distance models without MHW effect
+dis_mod_no_MHW_GS <- bam(
+          standerized_distance ~ s(DecimalTimeOfDay, bs = 'cc', m = 2) + s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc', m = 1) , data = MHWs_fish_data_distance_filtered, method = "REML", family = gaussian())
+dis_mod_no_MHW_S <- bam(
+          standerized_distance ~  s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc'), data = MHWs_fish_data_distance_filtered, method = "REML", family = gaussian())
+dis_mod_no_MHW_GI <- bam(
+          standerized_distance ~ s(DecimalTimeOfDay, bs = 'cc', m = 2) + s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc', m = 1) + s(Serial_fish_id, bs = "re") ,data = MHWs_fish_data_distance_filtered, method = "REML", family = gaussian())
+dis_mod_no_MHW_I <-bam(
+          standerized_distance ~  s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc') + s(Serial_fish_id, bs = "re"),data = MHWs_fish_data_distance_filtered, method = "REML", family = gaussian())
+
+
+dis_models_no_MHW <- list(
+  dis_mod_no_MHW_GS,dis_mod_no_MHW_S,dis_mod_no_MHW_GI, dis_mod_no_MHW_I
+)
+performance::compare_performance(dis_models_no_MHW, rank = TRUE)
+##I wins
+
+# Without global and with smooth for Before_after
+# shared wiggliness
+dis_mod_Is <- bam(
+          standerized_distance ~ s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc') + s(Serial_fish_id, bs = "re") + s(DecimalTimeOfDay, by = Before_After, bs = 'cc'),data = MHWs_fish_data_distance_filtered, method = "REML", family = gaussian())
+
+# Without global and without smooth for Before_after
+# Differed wiggliness
+dis_mod_I <- bam(
+          standerized_distance ~ s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc') + s(Serial_fish_id, bs = "re") + Before_After,data = MHWs_fish_data_distance_filtered, method = "REML", family = gaussian())
+
+comparison_dis_models <- list(
+  dis_mod_no_MHW_I,dis_mod_I,dis_mod_Is
+)
+
+performance::compare_performance(comparison_dis_models, rank = TRUE)
+# dis_mod_Is wins
+appraise(dis_mod_Is)
+
+#Population - level
+plot_smooths(dis_mod_Is, series = DecimalTimeOfDay, comparison = Before_After) + 
+  theme(legend.position = "top") + 
+  theme_bw() +
+  scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) + 
+  scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+  # Optional: Adjust transparency of the CI fill (alpha)
+  theme(legend.position = "top")
+
+#Individual - level
+plot_smooths(act_mod_Is, series = DecimalTimeOfDay, comparison = Before_After,facet_terms = Serial_fish_id) + 
+  theme(legend.position = "top") + 
+  theme_bw() +
+  scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) + 
+  scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+  # Optional: Adjust transparency of the CI fill (alpha)
+  theme(legend.position = "top")
+
+
+model_formulas <- lapply(depth_models, formula)
+
+model_selection <- data.frame(
+  Model = character(),
+  AIC = numeric(),
+  BIC = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop over all models
+for (i in seq_along(depth_models)) {
+  model <- depth_models[[i]]
+  model_name <- model_formulas[i]
+  
+  # Extract metrics
+  aic <- AIC(model)
+  bic <- BIC(model)
+
+  # Add to the results table
+  model_selection <- rbind(model_selection, 
+                           data.frame(Model = as.character(model_name), AIC = aic, BIC = bic))
+}
+
+# Sort by AIC (or BIC) to find the best model
+model_selection <- model_selection[order(model_selection$AIC), ]
+
+
+act_models <- list(act_mod_no_MHW_GI,act_mod_no_MHW_GS,act_mod_no_MHW_I,act_mod_no_MHW_S,act_mod_S,act_mod_I,act_mod_Is)
+saveRDS(act_models,"Red Sea/Results/Act_Models.RDS")
+
+
+```
+
+# Not sure if necessary
+### Models
+```{r}
+# Create a column with the time of the day
+MHWs_fish_data$TimeOfDay <- as.POSIXct(format(MHWs_fish_data$real_datetime,format = "%H:%M:%S"),format = "%H:%M:%S")
+
+# Convert time of day to decimal format for modeling
+MHWs_fish_data$DecimalTimeOfDay <- time_to_decimal(MHWs_fish_data$TimeOfDay) 
+
+# Convert fish_id and Before_after to factor
+MHWs_fish_data$fish_id <- as.factor(MHWs_fish_data$fish_id)
+MHWs_fish_data$Before_After <- as.factor(MHWs_fish_data$Before_After)
+
+# Create unique identifiers for combinations of MHW Serial and Fish ID
+MHWs_fish_data$MHW_Serial_Fish_Id <- paste(MHWs_fish_data$Serial, MHWs_fish_data$fish_id)
+MHWs_fish_data$MHW_Serial_Fish_Id <- as.factor(MHWs_fish_data$MHW_Serial_Fish_Id)
+
+# Create unique identifiers for combinations of MHW Serial, Fish ID, and Before/After stages
+MHWs_fish_data$MHW_Serial_Fish_Id_Befoe_After <- paste(MHWs_fish_data$MHW_Serial_Fish_Id, MHWs_fish_data$Before_After)
+MHWs_fish_data$MHW_Serial_Fish_Id_Befoe_After <- as.factor(MHWs_fish_data$MHW_Serial_Fish_Id_Befoe_After)
+
+# Log-transform depth to address skewness in distribution
+MHWs_fish_data$log_depth <- log(MHWs_fish_data$depth + 1) 
+hist(MHWs_fish_data$log_depth) # Check distribution post-transformation
+
+### Generalized Additive Models (GAMs)
+
+## Activity
+# Global GAM for activity with a cyclic spline for time of day and random effects for fish ID
+G_activity_gam <- gam(activity ~ s(DecimalTimeOfDay,k=25,bs="cc")+s(fish_id, bs="re"),data=MHWs_fish_data, method="REML", family="tw")
+draw(G_activity_gam)  # Visualize model fit
+plot(G_activity_gam)
+summary(G_activity_gam) # Summary of the model
+mgcv::gam.check(G_activity_gam) # Diagnostics
+gratia::appraise(G_activity_gam) # Additional diagnostics
+
+# GAM with interaction: Time of day and Before/After stages
+GS_activity_gam <- bam(activity ~ s(DecimalTimeOfDay,by=Before_After,bs="cc") + Before_After +s(fish_id, bs="re"),data=MHWs_fish_data, method="REML", family="tw")
+draw(GS_activity_gam)
+mgcv::plot.gam(GS_activity_gam)
+summary(GS_activity_gam)
+mgcv::gam.check(GS_activity_gam)
+
+# Visualize smooth terms with respect to Before/After stages
+plot_smooths(GS_activity_gam,series = DecimalTimeOfDay,comparison = Before_After)+
+  theme(legend.position = "top")+
+  theme_bw()
+
+## Distance from Shore
+
+# GAM for standardized distance with cyclic spline for time of day and random effects for fish ID
+S_distance_gam <- bam(standerized_distance ~ s(DecimalTimeOfDay, by = Before_After, bs = "cc") + 
+                        s(fish_id, bs = "re"), data = MHWs_fish_data, method = "REML", family = "gaussian")
+draw(S_distance_gam)
+mgcv::gam.check(S_distance_gam)
+gratia::appraise(S_distance_gam)
+summary(S_distance_gam)
+
+# Visualize smooth terms
+plot_smooths(S_distance_gam, series = DecimalTimeOfDay, comparison = Before_After) +
+  theme(legend.position = "top") + theme_bw()
+
+## Depth
+
+# GAM for depth with interaction between time of day and fish ID
+G_depth_gam <- bam(depth ~ s(DecimalTimeOfDay,bs="cc") + s(DecimalTimeOfDay,by = MHW_Serial_Fish_Id, bs="cc"),data=MHWs_fish_data, method="REML", family="gaussian")
+summary(G_depth_gam)
+gam.check(G_depth_gam)
+# Visualize smooths for depth
+plot_smooths(G_depth_gam, series = DecimalTimeOfDay, comparison = MHW_Serial_Fish_Id) +
+  theme(legend.position = "top") + theme_bw() + scale_y_reverse()
+
+# Depth model with Before/After stages included
+G_depth_Bef.Aft_gam <- bam(depth ~ s(DecimalTimeOfDay, by = Before_After, bs = "cc") + 
+                             s(DecimalTimeOfDay, by = MHW_Serial_Fish_Id_Befoe_After, bs = "cc"), 
+                           data = MHWs_fish_data, method = "REML", family = "gaussian")
+summary(G_depth_Bef.Aft_gam)
+gam.check(G_depth_Bef.Aft_gam)
+
+# Visualization
+plot_smooths(G_depth_Bef.Aft_gam, series = DecimalTimeOfDay, comparison = Before_After) +
+  theme(legend.position = "top") + theme_bw() + scale_y_reverse()
+
+# Depth model with simpler interaction terms
+G_depth_Bef.Aft1_gam <- bam(depth ~ s(DecimalTimeOfDay, by = Before_After, bs = "cc") + 
+                              s(DecimalTimeOfDay, by = MHW_Serial_Fish_Id, bs = "cc"), 
+                            data = MHWs_fish_data, method = "REML", family = "gaussian")
+summary(G_depth_Bef.Aft1_gam)
+gam.check(G_depth_Bef.Aft1_gam)
+
+# Depth model with Before/After interaction and random fish effects
+S_depth_gam <- bam(depth ~ s(DecimalTimeOfDay, by = Before_After, bs = "cc") + 
+                     s(fish_id, bs = "re"), data = MHWs_fish_data, method = "REML", family = "nb")
+summary(S_depth_gam)
+mgcv::gam.check(S_depth_gam)
+draw(S_distance_gam) 
+gratia::appraise(S_depth_gam)
+
+# Visualize smooths
+plot_smooths(S_depth_gam, series = DecimalTimeOfDay, comparison = Before_After) +
+  theme(legend.position = "top") + theme_bw() + scale_y_reverse()
+
+# Create a dataframe to generate predictions
+new_data <- expand.grid(
+  DecimalTimeOfDay = seq(0, 24, length.out = 100),  # Generate 100 equally spaced time points from 0 to 24
+  Before_After = factor(c("Before", "MHW", "After"),  # Specify levels of the factor variable 'Before_After'
+                        levels = levels(MHWs_fish_data$Before_After)),  # Match the levels in the original data
+  fish_id = levels(MHWs_fish_data$fish_id)  # Include all unique fish IDs from the original dataset
+)
+
+# Generate predictions using the fitted GAM model
+predictions <- predict(
+  S_depth_gam,                 # The GAM model
+  newdata = new_data,          # Dataframe containing the values for prediction
+  type = "response",           # Predict on the response scale
+  se.fit = TRUE                # Return standard errors for predictions
+)
+
+# Add predicted depth values and confidence intervals to the new_data dataframe
+new_data$predicted_depth <- predictions$fit  # Predicted values
+new_data$lower_ci <- new_data$predicted_depth - 1.96 * predictions$se.fit  # Lower 95% CI
+new_data$upper_ci <- new_data$predicted_depth + 1.96 * predictions$se.fit  # Upper 95% CI
+
+# Plot the predicted depth over time
+ggplot(new_data, aes(x = DecimalTimeOfDay, y = predicted_depth, colour = Before_After, group = Before_After)) +
+  geom_line() +  # Add lines for predicted depth
+  geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci, fill = Before_After), alpha = 0.2, colour = NA) +
+  # Add confidence intervals as shaded ribbons
+  facet_wrap(~fish_id, scales = "free_y") +  # Create separate panels for each fish ID, allowing y-axis to vary
+  theme_bw() +  # Use a clean black-and-white theme
+  labs(
+    x = "Time of Day (Decimal)",  # Label for the x-axis
+    y = "Predicted Depth",        # Label for the y-axis
+    title = "Predicted Depth Over Time by MHW Stage for Each Fish ID"  # Plot title
+  ) +
+  theme(
+    legend.position = "top",             # Position legend at the top
+    strip.text = element_text(size = 8)  # Reduce font size for facet labels to accommodate many fish IDs
+  )+
+  scale_y_reverse()
+
+```
+## Calculate means before and after the heat wave - wide
+```{r}
+MHWs_stat <- data.frame(
+  fish_id=numeric(),
+  Serial=numeric(),
+  window_factor=numeric(),
+  Period_of_day=character(),
+  ln_activity_ratio_bef_dur=numeric(),
+  ln_activity_ratio_dur_aft=numeric(),
+  ln_activity_ratio_bef_aft=numeric(),
+  delta_depth_bef_dur=numeric(),
+  delta_depth_dur_aft=numeric(),
+  delta_depth_bef_aft=numeric(),
+  delta_distance_bef_dur=numeric(),
+  delta_distance_dur_aft=numeric(),
+  delta_distance_bef_aft=numeric())
+
+for (event_calc in 1:dim(nest_hw)[1]) {
+  temp_heat_wave <- nest_hw$data[[event_calc]]
+  # If contains date
+  # temp_heat_wave <- temp_heat_wave %>%
+  #   rename("activity" = "activity_mean",
+  #          "depth" = "depth_mean",
+  #          "distance_shore" = "distance_shore_mean") %>%
+  #   group_by(fish_id,Before_After,Check_period)
+  # # %>%
+  #   summarise_at(vars(activity,depth,distance_shore),funs(mean(.,na.rm=T), median(.,na.rm=T),
+  #                                                       sd(.,na.rm=T),n()))
+  # 
+  #With period
+  for (fish in unique(temp_heat_wave$fish_id)) {
+    temp_fish <- temp_heat_wave %>% filter(fish_id==fish)
+    for (period in unique(temp_heat_wave$Period)) {
+      temp_period <- temp_fish %>% filter(Period==period)
+      temp_row <- data.frame(
+                  fish_id=fish,
+                  Serial=nest_hw$Serial[[event_calc]],
+                  window_factor=nest_hw$window_factor[[event_calc]],
+                  Period_of_day=period,
+                  ln_activity_ratio_bef_dur=NA,
+                  ln_activity_ratio_dur_aft=NA,
+                  ln_activity_ratio_bef_aft=NA,
+                  delta_depth_bef_dur=NA,
+                  delta_depth_dur_aft=NA,
+                  delta_depth_bef_aft=NA,
+                  delta_distance_bef_dur=NA,
+                  delta_distance_dur_aft=NA,
+                  delta_distance_bef_aft=NA)
+                  if(dim(temp_period[temp_period$Before_After=="MHW",])[1]>0
+                     &dim(temp_period[temp_period$Before_After=="Before",])[1]>0)
+                  {
+                    temp_row$ln_activity_ratio_bef_dur <- log(temp_period$activity_mean[temp_period$Before_After=="MHW"] /temp_period$activity_mean[temp_period$Before_After=="Before"])
+                    temp_row$delta_depth_bef_dur <- temp_period$depth_mean[temp_period$Before_After=="MHW"] - temp_period$depth_mean[temp_period$Before_After=="Before"]
+                    temp_row$delta_distance_bef_dur <- abs(temp_period$distance_shore_mean[temp_period$Before_After=="MHW"]- temp_period$distance_shore_mean[temp_period$Before_After=="Before"])
+                  }
+                  if(dim(temp_period[temp_period$Before_After=="MHW",])[1]>0
+                      &dim(temp_period[temp_period$Before_After=="After",])[1]>0)
+                  {
+                     temp_row$ln_activity_ratio_dur_aft <- log(temp_period$activity_mean[temp_period$Before_After=="After"]/temp_period$activity_mean[temp_period$Before_After=="MHW"])
+                     temp_row$delta_depth_dur_aft <- temp_period$depth_mean[temp_period$Before_After=="After"] - temp_period$depth_mean[temp_period$Before_After=="MHW"]
+                     temp_row$delta_distance_dur_aft <-
+                     abs(temp_period$distance_shore_mean[temp_period$Before_After=="After"] - temp_period$distance_shore_mean[temp_period$Before_After=="MHW"])
+                  }
+                  if(dim(temp_period[temp_period$Before_After=="Before",])[1]>0
+                      &dim(temp_period[temp_period$Before_After=="After",])[1]>0)
+                  {
+                    temp_row$ln_activity_ratio_bef_aft <- log(temp_period$activity_mean[temp_period$Before_After=="After"]/temp_period$activity_mean[temp_period$Before_After=="Before"])
+                    temp_row$delta_depth_bef_aft <- temp_period$depth_mean[temp_period$Before_After=="After"] - temp_period$depth_mean[temp_period$Before_After=="Before"]
+                    temp_row$delta_distance_bef_aft <-
+                    abs(temp_period$distance_shore_mean[temp_period$Before_After=="After"] - temp_period$distance_shore_mean[temp_period$Before_After=="Before"])
+                  }
+      MHWs_stat <- rbind(MHWs_stat,temp_row)
+    }
+  }
+}
+MHWs_stat <- merge(MHWs_stat,MHWs_Eilat_Fix_OISST,by = "Serial")
+MHWs_stat <- MHWs_stat %>% select(-Fish_IDs)#remove fish id
+stat_tags_metadata_parrot <- tags_metadata_parrot %>% 
+  select(fish_id,species) 
+MHWs_stat <- distinct(merge(MHWs_stat,stat_tags_metadata_parrot,by = "fish_id"))
+write.csv(MHWs_stat,paste("Red Sea/Results/Individual Heatwaves/Eilat_MHWs_Stat_IUI__Fixbase_MHW_Stage_Avg_wide",Sys.Date(),".csv"))
+```
+## Graphs
+```{r}
+#activity
+for (period in unique(MHW_Data$period_of_day)) {
+ activity_plot <- ggplot(MHW_Data[MHW_Data$period_of_day==period,],aes(x=Before_After,y=activity))+
+  geom_point(size=0.3,color="black",alpha=0.5)+
+  geom_vline(xintercept = 0,color="red")+
+  # scale_x_datetime(date_breaks = "7 days",date_labels = "%d/%m/%y")+
+  geom_smooth(color="blue")+
+  facet_wrap(~fish_id,ncol=1)+
+   theme_bw()+
+   theme(panel.grid.major = element_blank(),
+         panel.grid.minor = element_blank(),
+         panel.background = element_blank(),
+         legend.position="none")
+ depth_plot <- ggplot(MHW_Data[MHW_Data$period_of_day==period,],aes(x=Before_After,y=depth))+
+  geom_point(size=0.3,color="black",alpha=0.5)+
+  geom_vline(xintercept = 0,color="red")+
+  # scale_x_datetime(date_breaks = "7 days",date_labels = "%d/%m/%y")+
+  geom_smooth(color="darkgreen")+
+  facet_wrap(~fish_id,ncol=1)+
+   theme_bw()+
+   theme(panel.grid.major = element_blank(),
+         panel.grid.minor = element_blank(),
+         panel.background = element_blank(),
+         legend.position="none")
+ longshore_plot <- ggplot(MHW_Data[MHW_Data$period_of_day==period,],aes(x=Before_After,y=distance_shore))+
+  geom_point(size=0.3,color="black",alpha=0.5)+
+  geom_vline(xintercept = 0,color="red")+
+  # scale_x_datetime(date_breaks = "7 days",date_labels = "%d/%m/%y")+
+  geom_smooth(color="gold")+
+  facet_wrap(~fish_id,ncol=1)+
+   theme_bw()+
+   theme(panel.grid.major = element_blank(),
+         panel.grid.minor = element_blank(),
+         panel.background = element_blank(),
+         legend.position="none")
+ comibne_plot <- activity_plot+depth_plot+longshore_plot
+ggsave(paste("Before_After_plot_",period,".png"),width = 4500,height = 10000,units = "px") 
+}
+ 
+
+```
+
+### Combine fish and parrotfish
+```{r}
+MHWs_combined_data <- MHWs_fish_data %>% dplyr::select(Serial,fish_id,real_datetime,Before_After,activity,depth,distance_shore,intensity_mean,intensity_max,intensity_cumulative,duration,rate_onset,rate_decline,start_3,end_3,reliabaility.level.2,reliabaility.level.3)
+MHWs_combined_data <- rbind(MHWs_combined_data,MHWs_parrotfish_data[,c(1:3,5:7,14,19:21,23,29:30,38:41)])
+MHWs_combined_data <- MHWs_combined_data %>% 
+  rename("reliabaility.level"= "reliabaility.level.2", "reliabaility.level.1" = "reliabaility.level.3")
+MHWs_combined_data$Before_After <- factor(MHWs_combined_data$Before_After,levels = c("Before","MHW","After"))
+```
+### plot daily curves
+```{r}
+MHWs_combined_data$real_datetime <- ymd_hms(MHWs_combined_data$real_datetime)
+MHWs_combined_data$TimeOfDay <- as.POSIXct(format(MHWs_combined_data$real_datetime,format = "%H:%M:%S"),format = "%H:%M:%S")
+ggplot(MHWs_combined_data, aes(y=activity,x=TimeOfDay))+
+  geom_smooth(aes(color = Before_After))+
+  scale_x_datetime(breaks="3 hours",date_labels = "%H:%M")+
+  theme_bw()
+
+ggplot(MHWs_combined_data, aes(y=depth,x=TimeOfDay))+
+  geom_smooth(aes(color = Before_After))+
+  scale_x_datetime(breaks="3 hours",date_labels = "%H:%M")+
+  scale_y_reverse()+
+  theme_bw()+
+  geom_point()
+
+ggplot(MHWs_combined_data, aes(y=distance_shore,x=TimeOfDay))+
+  geom_smooth(aes(color = Before_After))+
+  scale_x_datetime(breaks="3 hours",date_labels = "%H:%M")+
+  theme_bw()
+```
+
+
+## Check seasonality effect
+```{r}
+relevant_fish_id <- c("1212923","1212924", "1212925", "1168792", "1168793", "1255784", "1255785", "1255801", "1255802", "1255803", "1255804", "1255815", "1255814", "1255812", "1255811", "1255810", "1255807", "1255806", "1255800", "1255791", "1255792", "1273483", "1273484", "1273486", "1273489", "1273490", "19111342", "19111348", "19111351", "19111354", "19111357", "19111363", "19111369", "19111372", "1255805")
+season_df <- combined_parrotfish_df %>% filter(fish_id %in% relevant_fish_id)
+
+## Add temp data
+OISST_data_red <- readRDS("Red Sea/Eilat climetology/OISST_SST_Red.RDS")
+OISST_data_red <- OISST_data_red %>%
+  filter(t %in% combined_parrotfish_df$date) %>% 
+  select(t,temp) %>% 
+  rename("date" = "t")
+season_df <- merge(season_df,OISST_data_red,by = "date")
+
+## Add species
+species_metadata <- read.xlsx("Red Sea/Renanel All data/ID list fish.xlsx")
+species_metadata <- species_metadata %>% rename("fish_id" = "id")
+season_df <- season_df %>% select(-species)
+season_df <- merge(season_df,species_metadata,by = "fish_id")
+write.csv(season_df, "Red Sea/Results/seasonality.csv")
+
+
+```
+
+## Models loop
+```{r}
+# Define lists to store models and dredge results
+models_list <- list()
+dredge_results <- list()
+
+# Unique Species values
+species <- unique(MHWs_fish_data$species)
+
+# Loop through each species
+for (sp_i in species) {
+  # Filter data for the current species
+  data_species <- MHWs_fish_data %>% filter(species == sp_i)
+  
+  # Split the data for activity and depth, and remove rows with NAs
+  data_species_depth <- data_species %>%
+    filter(!is.na(log_depth)) %>% 
+    select(log_depth,DecimalTimeOfDay,species,Before_After,duration,intensity_mean,intensity_mean_abs,rate_onset)
+  data_species_activity <- data_species %>% filter(!is.na(activity)) %>% 
+    select(activity,DecimalTimeOfDay,species,Before_After,duration,intensity_mean,intensity_mean_abs,rate_onset)
+  
+  # Check for sufficient data in both datasets
+  if (nrow(data_species_depth) > 10 || nrow(data_species_activity) > 10) { # Adjust threshold as needed
+    # Check if random effects are needed for depth and activity models
+    include_fish_id_depth <- length(unique(data_species_depth$fish_id)) > 1
+    include_serial_depth <- length(unique(data_species_depth$Serial)) > 1
+    
+    include_fish_id_activity <- length(unique(data_species_activity$fish_id)) > 1
+    include_serial_activity <- length(unique(data_species_activity$Serial)) > 1
+    
+    # Build formulas dynamically
+    formula_depth <- as.formula(
+      paste(
+        "log_depth ~ s(DecimalTimeOfDay, by = Before_After, bs = 'cc') + Before_After + intensity_mean + duration + rate_onset + intensity_mean_abs",
+        if (include_fish_id_depth) "+ s(fish_id, bs = 're')" else "",
+        if (include_serial_depth) "+ s(Serial, bs = 're')" else "",
+        sep = " "
+      )
+    )
+    formula_activity <- as.formula(
+      paste(
+        "activity ~ s(DecimalTimeOfDay, by = Before_After, bs = 'cc') + Before_After + intensity_mean + duration + rate_onset + intensity_mean_abs",
+        if (include_fish_id_activity) "+ s(fish_id, bs = 're')" else "",
+        if (include_serial_activity) "+ s(Serial, bs = 're')" else "",
+        sep = " "
+      )
+    )
+    
+    # Fit depth model
+    if (nrow(data_species_depth) > 10) {
+      tryCatch({
+        model_depth <- bam(
+          formula_depth,
+          data = data_species_depth, method = "REML", family = gaussian(),
+          na.action = na.fail
+
+        )
+        models_list[[paste("Species", sp_i, "Depth", sep = "_")]] <- model_depth
+        dredge_results[[paste("Species", sp_i, "Depth", sep = "_")]] <- dredge(model_depth)
+      }, error = function(e) {
+        message(paste("Error fitting depth model for Species:", sp_i, "-", e$message))
+      })
+    }
+    
+    # Fit activity model
+    if (nrow(data_species_activity) > 10) {
+      tryCatch({
+        model_activity <- bam(
+          formula_activity,
+          data = data_species_activity, method = "REML", family = "tw",
+          na.action = na.fail
+        )
+        models_list[[paste("Species", sp_i, "Activity", sep = "_")]] <- model_activity
+        dredge_results[[paste("Species", sp_i, "Activity", sep = "_")]] <- dredge(model_activity)
+      }, error = function(e) {
+        message(paste("Error fitting activity model for Species:", sp_i, "-", e$message))
+      })
+    }
+  } else {
+    message(paste("Skipping Species:", sp_i, "- insufficient data"))
+  }
+}
+# Save model list
+saveRDS(models_list,"Red Sea/Results/Models_list_per_sp.RDS")
+
+# Access individual models
+names(models_list)  # Check model identifiers
+model_summaries <- lapply(models_list, summary)
+
+# Save diagnostics plots
+for (name in names(models_list)) {
+  model <- models_list[[name]]
+  diagnostics_plot <- gratia::appraise(model) +
+    ggtitle(paste("Model:", name)) # Diagnostics plot
+  
+  # Save the diagnostics plot as a PNG file
+  file_name <- paste0("Diagnostics_", name, ".png")  # Generate file name
+  ggsave(paste("Red Sea/Results/Models diagnostics/",file_name), plot = diagnostics_plot,
+         width = 10, height = 6, dpi = 300)
+  message(paste("Saved diagnostics plot for model:", name))
+
+}
+
+
+for (name in names(models_list)) {
+  model <- models_list[[name]]
+  plot_smooths(model, series = DecimalTimeOfDay, comparison = Before_After) +
+  theme(legend.position = "top") + 
+    ggtitle(paste("Model:", name)) +
+    theme_bw()
+}
+
+
+predictions_list <- lapply(models_list, function(model) {
+    # Check if the model is for depth or activity
+    if (grepl("Depth", deparse(substitute(model)))) {
+      # Prediction for depth model (log-transformed)
+      log_pred <- predict(model, type = "response")  # Predicted on log scale
+      # Back-transform the log-transformed predictions to the original scale
+      exp_pred <- exp(log_pred)
+      return(exp_pred)  # Return the back-transformed predictions
+    } else  {
+      # Prediction for activity model (on the scale used for the activity model)
+      activity_pred <- predict(model, type = "response")
+      return(activity_pred)  # Return activity predictions
+    }
+  })
+
+
+
+```
+

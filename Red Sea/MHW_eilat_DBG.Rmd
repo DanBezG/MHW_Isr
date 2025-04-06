@@ -17,8 +17,7 @@ library(ggplot2)
 library(mgcv)
 library(gratia)
 library(DataExplorer)
-library(VGAM) ## GAM
-library(tidymv) # Plot_smooths
+library(ggeffects) # Plot gam effects
 library(rfishbase)
 library(glatos) # for collision estimating
 ```
@@ -144,7 +143,7 @@ time_to_decimal <- function(time) {
 models_comparison <- function(models)
 {
   model_names <- paste0("Model_", seq_along(models))
-   comparison <- data.frame(
+   comparison <- tibble(
     Model_number = model_names,  
     model_formula = sapply(models, function(model) paste(deparse(formula(model)), collapse = "")),
     AIC = sapply(models, AIC),
@@ -155,6 +154,16 @@ models_comparison <- function(models)
   )
   # Order by AIC (ascending, best model first)
   comparison <- comparison %>% arrange(AIC)
+  
+  # Compute ΔAIC (relative to best model)
+  comparison <- comparison %>%
+    mutate(Delta_AIC = AIC - min(AIC, na.rm = TRUE))
+  
+  # Compute ΔR² (relative to best model)
+  max_r2 <- max(comparison$R2, na.rm = TRUE)
+  comparison <- comparison %>%
+    mutate(Delta_R2 = max_r2 - R2)
+  
   print(comparison)
   return(comparison)
 }
@@ -167,14 +176,14 @@ models_comparison <- function(models)
 run_model_safely <- function(formula, data, family) {
   model <- tryCatch(
     {
-      bam(formula, data = data, method = "REML", family = family)
+      bam(formula, data = data, method = "REML", family = family, knots= list(DecimalTimeOfDay=c(-0.5,24.5)))
     },
     error = function(e) {
       message("❌ Model failed to run: ", conditionMessage(e))
       return(NULL)  # Return NULL for failed models
     },
     warning = function(w) {
-      message("⚠️ Warning: ", conditionMessage(w))
+      message("⚠️ Warning: ", conditionMessage(w), "Model: ", formula)
       return(NULL)  # Treat warnings as failures
     }
   )
@@ -211,12 +220,10 @@ automate_model_selection <- function(data, response_var, family) {
   # 1️⃣ Step 1: Fit initial models (without MHW effect)
   # -------------------------------------------
   model_formulas_no_MHW <- list(
-    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, bs = 'cc', m = 2) + s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc', m = 1)")),
-    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc')")),
-    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, bs = 'cc', m = 2) + s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc', m = 1) + s(Serial_fish_id, bs = 're')")),
-    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, by = Serial_fish_id, bs = 'cc') + s(Serial_fish_id, bs = 're')"))
-  )
-
+    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, bs = 'cc') + s(Serial_fish_id, k=12, bs='re')")), # Global with individual fish random  intercept effect
+    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, bs = 'cc', m = 2) +s(DecimalTimeOfDay, Serial_fish_id,bs='fs',k=12, m = 1) ")),# GS - global with random intecept and slope for individual fish
+    as.formula(paste(response_var, "~ s(DecimalTimeOfDay, Serial_fish_id,bs='fs',k=12)"))) # S - random slopes and intercept per fish
+  
   models_no_MHW <- lapply(model_formulas_no_MHW, run_model_safely, data = data, family = family)
   models_no_MHW <- Filter(Negate(is.null), models_no_MHW)  # Remove NULL models
 
@@ -229,13 +236,34 @@ automate_model_selection <- function(data, response_var, family) {
   message("🏆 Best model without MHW: ", deparse(formula(best_no_MHW)))
   
   # -------------------------------------------
-  # 2️⃣ Step 2: Add MHW effect (smooth or fixed)
+  #  Step 2: Add species effect
+  # -------------------------------------------
+  # model_formulas_with_species <- list(
+  #   formula(best_no_MHW),
+  #   update.formula(formula(best_no_MHW), . ~ . + species + s(DecimalTimeOfDay,by = species, bs = 'cc'))
+  # )
+  # 
+  # models_with_species <- lapply(model_formulas_with_species, run_model_safely, data = data, family = family)
+  # models_with_species <- Filter(Negate(is.null), models_with_species)  # Remove NULL models
+  # 
+  # if (length(models_with_species) == 0) {
+  #   message("⚠️ No models converged with species effect. Returning best model without species.")
+  #   return(list(best_model = best_no_MHW, all_models = all_models))
+  # }
+  # 
+  # all_models[["with_species"]] <- models_with_species
+  # 
+  # # Select the best model with or without species
+  # best_with_species <- models_with_species[[which.min(sapply(models_with_species, AIC))]]
+  # message("🏆 Best model with species: ", deparse(formula(best_with_species)))
+  
+  # -------------------------------------------
+  #  Step 3: Add MHW effect 
   # -------------------------------------------
   model_formulas_with_MHW <- list(
     formula(best_no_MHW),
-    update.formula(formula(best_no_MHW), . ~ . + s(DecimalTimeOfDay, by = Before_After, bs = 'cc')),  # Smooth effect
-    update.formula(formula(best_no_MHW), . ~ . + Before_After)  # Fixed effect
-  )
+    update.formula(formula(best_no_MHW), . ~ . + Before_After),
+    as.formula(paste(response_var, "~ Before_After + s(DecimalTimeOfDay, Serial_fish_id,bs='fs',by=Before_After,k=12)"))) # S - random slopes and intercept per fish and MHW effect on intercept and on smooth
 
   models_with_MHW <- lapply(model_formulas_with_MHW, run_model_safely, data = data, family = family)
   models_with_MHW <- Filter(Negate(is.null), models_with_MHW)  # Remove NULL models
@@ -245,48 +273,98 @@ automate_model_selection <- function(data, response_var, family) {
   all_models[["with_MHW"]] <- models_with_MHW
   
   # Select the best model with MHW (the model object, not just formula)
-  best_with_MHW <- models_with_MHW[[which.min(sapply(models_with_MHW, AIC))]]
-  message("🏆 Best model with MHW: ", deparse(formula(best_with_MHW)))
-  
-  # -------------------------------------------
-  # 3️⃣ Step 3: Add species effect
-  # -------------------------------------------
-  model_formulas_with_species <- list(
-    formula(best_with_MHW),
-    update.formula(formula(best_with_MHW), . ~ . + species)
-  )
-
-  models_with_species <- lapply(model_formulas_with_species, run_model_safely, data = data, family = family)
-  models_with_species <- Filter(Negate(is.null), models_with_species)  # Remove NULL models
-
-  if (length(models_with_species) == 0) {
-    message("⚠️ No models converged with species effect. Returning best model without species.")
-    return(list(best_model = best_with_MHW, all_models = all_models))
-  }
-  
-  all_models[["with_species"]] <- models_with_species
-  
-  # Select the best final model (the model object, not just formula)
-  best_final <- models_with_species[[which.min(sapply(models_with_species, AIC))]]
-  message("🏆 Best final model with species: ", deparse(formula(best_final)))
+  best_final <- models_with_MHW[[which.min(sapply(models_with_MHW, AIC))]]
+  message("🏆 Best final model with MHW: ", deparse(formula(best_final)))
   
   # Combine all lists in 'all_models' into one list
-  combined_models <- c(all_models$no_MHW, all_models$with_MHW, all_models$with_species)
-
-  # Remove duplicate models based on formula (or use a more advanced method if necessary)
-  model_formulas <- sapply(combined_models, function(model) deparse(formula(model)))
-  unique_formulas <- unique(model_formulas)
-  unique_models <- combined_models[model_formulas %in% unique_formulas]
+  combined_models <- c(all_models$no_MHW, all_models$with_MHW)
   
   # Run model comparison on unique models
-  comparison_table <- models_comparison(unique_models)
+  comparison_table <- models_comparison(combined_models)
   
   # Return the best model object and the comparison table
-  return(list(best_model = best_final, all_models = all_models, comparison_table = comparison_table))
+  return(list(best_model = best_final, all_models = all_models, comparison_table = comparison_table,data = data))
 }
 
 
 
+
+Plot_with_species <- function(mod,my_data)
+{
+  
+# Ensure Serial_fish_id is correctly paired with species
+unique_fish <- my_data %>%
+  select(Serial_fish_id, species) %>%
+  distinct()
+
+# Create new data with appropriate Serial_fish_id for each species
+new_data <- expand.grid(
+  DecimalTimeOfDay = seq(min(my_data$DecimalTimeOfDay), max(my_data$DecimalTimeOfDay), length.out = 100),
+  Before_After = unique(my_data$Before_After)
+) %>%
+  # Expand for each individual fish with its corresponding species
+  crossing(unique_fish)
+
+# Get predictions while respecting fish ID and species
+preds <- predict(mod, newdata = new_data, type = "response", se.fit = TRUE)
+new_data$pred <- preds$fit
+new_data$se <- preds$se.fit
+
+# Average predictions over individuals within each species & Before_After
+agg_data <- new_data %>%
+  group_by(DecimalTimeOfDay, species, Before_After) %>%
+  summarise(
+    pred = mean(pred),
+    se = mean(se),
+    .groups = "drop"
+  )
+
+# Plot smooth curves
+ggplot(agg_data, aes(x = DecimalTimeOfDay, y = pred, color = Before_After)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = pred - 1.96 * se, ymax = pred + 1.96 * se, fill = Before_After), alpha = 0.2) +
+  facet_wrap(~ species,scales = "free") +
+  scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+  scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+  theme_minimal() +
+  labs(
+    x = "Time of Day",
+    title = "Smooth Effects by Species and Before/After"
+  ) +
+  theme(legend.position = "bottom")
+  
+}
+
+Plot_with_individuals <- function(mod,my_data)
+{
+  
+# Create new data with appropriate Serial_fish_id for each species
+new_data <- expand.grid(
+  DecimalTimeOfDay = seq(min(my_data$DecimalTimeOfDay), max(my_data$DecimalTimeOfDay), length.out = 100),
+  Serial_fish_id= unique(my_data$Serial_fish_id),
+  Before_After = unique(my_data$Before_After),
+  Serial_fish_id="no fish"
+) 
+# Get predictions while respecting fish ID and species
+preds <- predict(mod, newdata = new_data, type = "response", se.fit = TRUE,exclude = "s(Serial_fish_id)")
+new_data$pred <- preds$fit
+new_data$se <- preds$se.fit
+
+# Plot smooth curves
+ggplot(new_data, aes(x = DecimalTimeOfDay, y = pred, color = Before_After)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = pred - 1.96 * se, ymax = pred + 1.96 * se, fill = Before_After), alpha = 0.2) +
+  facet_wrap(~ Serial_fish_id,scales = "free") +
+  scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+  scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+  theme_minimal() +
+  labs(
+    x = "Time of Day",
+    title = "Smooth Effects by individuals and Before/After"
+  ) +
+  theme(legend.position = "bottom")
+  
+}
 ```
 
 # Planning design - acoustic & fish
@@ -406,7 +484,7 @@ tags_metadata <- read.xlsx("Red Sea/Renanel All data/ID list fish.xlsx")
   
 #MHWs metadata according to different def and databases
 MHWs_Eilat_Fix_OISST <- read.xlsx("Red Sea/MHWs_def/MHW_OISST_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
-MHWs_Eilat_Moving_OISST <- read.xlsx("Red Sea/MHWs_def/MHW_Amazia_Events_RedSea_Jacox.xlsx",sheet = "Short_MHW_Events_Fixed")
+MHWs_Eilat_Moving_OISST <- read.xlsx("Red Sea/MHWs_def/MHW_OISST_Events_RedSea_Jacox.xlsx",sheet = "Short_MHW_Events_Fixed")
 MHWs_Eilat_Fix_IUI <- read.xlsx("Red Sea/MHWs_def/MHW_IUI_1Daymean_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
 MHWs_Eilat_Fix_Amazia <- read.xlsx("Red Sea/MHWs_def/MHW_Amatzia_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
 
@@ -675,7 +753,7 @@ for (event_calc in 1:dim(nest_hw)[1]) {
   #                                                       sd(.,na.rm=T),n()))
   #
   
-  #With period
+  # With MHW stage
   # Iterate over each unique fish ID in the heatwave data
   for (fish in unique(temp_heat_wave$fish_id)) {
     temp_fish <- temp_heat_wave %>% filter(fish_id==fish) # Filter data for the current fish
@@ -985,7 +1063,7 @@ saveRDS(top_MHWs,"Red Sea/Results/Models/top_MHWs_OISST_Fix.rds")
 ### Create dataframe for GAM and daily curves - Need to choose dataset and change file names first!!
 ```{r}
 ####### choose which dataset to work on through MHWs_Eilat  ###########
-MHWs_Eilat <- MHWs_Eilat_Moving_OISST
+MHWs_Eilat <- MHWs_Eilat_Fix_Amazia
 
 MHWs_fish_data <- data.frame()
 for (event in 1:dim(MHWs_Eilat)[1]) {
@@ -1009,29 +1087,29 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
     MHW_Data <- merge(MHW_Data,temp_MHWs_Eilat,by="Serial")
     
     #standerized procedure
-     for (fish in unique(MHW_Data$fish_id)) {
-         avg_act <- mean(MHW_Data$activity[MHW_Data$fish_id==fish],na.rm = T)
-         avg_dep <- mean(MHW_Data$depth[MHW_Data$fish_id==fish],na.rm = T)
-         avg_dis <- mean(MHW_Data$distance_shore[MHW_Data$fish_id==fish],na.rm = T)
-         
-         MHW_Data$activity_std[MHW_Data$fish_id==fish] <- MHW_Data$activity[MHW_Data$fish_id==fish]- avg_act
-         MHW_Data$activity_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$activity[MHW_Data$fish_id==fish]- avg_act)/sd(MHW_Data$activity[MHW_Data$fish_id==fish],na.rm = T)
-         MHW_Data$depth_std[MHW_Data$fish_id==fish] <- MHW_Data$depth[MHW_Data$fish_id==fish]- avg_dep
-         MHW_Data$depth_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$depth[MHW_Data$fish_id==fish]- avg_dep)/sd(MHW_Data$depth[MHW_Data$fish_id==fish],na.rm = T)
-         MHW_Data$distance_std[MHW_Data$fish_id==fish] <- MHW_Data$distance_shore[MHW_Data$fish_id==fish]- avg_dis
-         MHW_Data$distance_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$distance_shore[MHW_Data$fish_id==fish]- avg_dis)/sd(MHW_Data$distance_shore[MHW_Data$fish_id==fish],na.rm = T)
-     }
-    
+     # for (fish in unique(MHW_Data$fish_id)) {
+     #     avg_act <- mean(MHW_Data$activity[MHW_Data$fish_id==fish],na.rm = T)
+     #     avg_dep <- mean(MHW_Data$depth[MHW_Data$fish_id==fish],na.rm = T)
+     #     avg_dis <- mean(MHW_Data$distance_shore[MHW_Data$fish_id==fish],na.rm = T)
+     #     
+     #     MHW_Data$activity_std[MHW_Data$fish_id==fish] <- MHW_Data$activity[MHW_Data$fish_id==fish]- avg_act
+     #     MHW_Data$activity_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$activity[MHW_Data$fish_id==fish]- avg_act)/sd(MHW_Data$activity[MHW_Data$fish_id==fish],na.rm = T)
+     #     MHW_Data$depth_std[MHW_Data$fish_id==fish] <- MHW_Data$depth[MHW_Data$fish_id==fish]- avg_dep
+     #     MHW_Data$depth_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$depth[MHW_Data$fish_id==fish]- avg_dep)/sd(MHW_Data$depth[MHW_Data$fish_id==fish],na.rm = T)
+     #     MHW_Data$distance_std[MHW_Data$fish_id==fish] <- MHW_Data$distance_shore[MHW_Data$fish_id==fish]- avg_dis
+     #     MHW_Data$distance_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$distance_shore[MHW_Data$fish_id==fish]- avg_dis)/sd(MHW_Data$distance_shore[MHW_Data$fish_id==fish],na.rm = T)
+     # }
+     # 
    
     MHWs_fish_data <- rbind(MHWs_fish_data,MHW_Data)  
   }
 }
 
-# Create Standerize distance shore
-MHWs_fish_data <- MHWs_fish_data %>% 
-  group_by(fish_id) %>% 
-  mutate(centered_distance = distance_shore-mean(distance_shore),
-         standerized_distance=centered_distance/sd(distance_shore))
+# # Create Standerize distance shore
+# MHWs_fish_data <- MHWs_fish_data %>% 
+#   group_by(fish_id) %>% 
+#   mutate(centered_distance = distance_shore-mean(distance_shore),
+#          standerized_distance=centered_distance/sd(distance_shore))
 
 # Create a column with the time of the day
 MHWs_fish_data$TimeOfDay <- as.POSIXct(format(MHWs_fish_data$real_datetime,format = "%H:%M:%S"),format = "%H:%M:%S")
@@ -1050,6 +1128,9 @@ MHWs_fish_data$Before_After <- as.factor(MHWs_fish_data$Before_After)
 # Ensure date columns are in POSIXct format
 MHWs_Eilat$date_start <- as.POSIXct(MHWs_Eilat$date_start)
 MHWs_Eilat$date_end <- as.POSIXct(MHWs_Eilat$date_end)
+
+MHWs_fish_data$Before_After <- factor(MHWs_fish_data$Before_After,levels = c("Before", "MHW", "After"))
+MHWs_fish_data$Before_After <- relevel(MHWs_fish_data$Before_After,ref="Before")
   
 ```
 
@@ -1139,7 +1220,7 @@ MHW_daily_distance_df <- MHW_daily_distance_df %>%
     intensity_var_abs = first(intensity_var_abs),
     rate_onset = first(rate_onset),
     rate_decline = first(rate_decline),
-    Category = first(Category),
+    # Category = first(Category),
     start_1.5 = first(start_1.5),
     reliability_level = first(reliabaility.level),
     end_1.5 = first(end_1.5),
@@ -1162,28 +1243,50 @@ hist(MHW_daily_distance_df$max_daily_displacement[MHW_daily_distance_df$Before_A
 hist(MHW_daily_distance_df$max_daily_displacement[MHW_daily_distance_df$Before_After=="MHW"])
 hist(MHW_daily_distance_df$max_daily_displacement[MHW_daily_distance_df$Before_After=="After"])
 
-# Count the number of appearances of each fish in each category
-paired_fish <- MHW_daily_distance_df %>%
+
+
+##max daily distance
+ggplot(MHW_daily_distance_df,aes(x=Before_After,y=max_daily_displacement))+
+  geom_boxplot()+
+  geom_point()+
+  theme_bw()
+
+
+MHW_daily_distance_df <- MHW_daily_distance_df %>%
+  mutate(Before_After = factor(Before_After, levels = c("Before", "MHW", "After")))
+
+mean_disp_df <- MHW_daily_distance_df %>%
   group_by(Serial_fish_id, Before_After) %>%
-  summarise(count = n()) %>%
-  spread(Before_After, count) 
-# Find the minimum count for each fish
-min_count <- paired_fish %>%
-  mutate(min_count = min(Before, MHW, After)) %>%
-  select(Serial_fish_id, min_count)
-# Merge the minimum count back to the original dataset
-balanced_fish_data <- paired_fish %>%
-  left_join(min_count, by = "Serial_fish_id") %>% 
-  select(Serial_fish_id,min_count)
+  summarise(mean_disp = mean(max_daily_displacement, na.rm = TRUE)) %>%
+  ungroup()
 
-# Join balanced_fish_data with MHW_daily_distance_df to get min_count per Serial_fish_id and Before_After
-balanced_data <- MHW_daily_distance_df %>%
-  left_join(balanced_fish_data, by = "Serial_fish_id")
+before_disp_df <- mean_disp_df %>%
+  filter(Before_After == "Before") %>%
+  select(Serial_fish_id, before_disp = mean_disp)
 
-#############try to figure out how to sample the right amount for each group############
+log_ratios_distances <- mean_disp_df %>%
+  left_join(before_disp_df, by = "Serial_fish_id") %>%
+  mutate(
+    log_ratio = log(mean_disp / before_disp)  # log(MHW/Before) and log(After/Before)
+  ) %>%
+  filter(Before_After != "Before" & !is.na(log_ratio))  # Remove the "Before" row, as it's the reference
 
+summary_log_ratios_distances <- log_ratios_distances %>%
+  group_by(Before_After) %>%
+  summarise(
+    mean_log_ratio = mean(log_ratio, na.rm = TRUE),
+    ci_low = mean_log_ratio - qt(0.975, df = n() - 1) * sd(log_ratio, na.rm = TRUE) / sqrt(n()),
+    ci_high = mean_log_ratio + qt(0.975, df = n() - 1) * sd(log_ratio, na.rm = TRUE) / sqrt(n())
+  )
 
-
+ggplot(summary_log_ratios_distances, aes(x = Before_After, y = mean_log_ratio)) +
+  geom_point(size = 3) +  # Add points for the mean
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.2) +  # Add error bars for CI
+  labs(
+    x = "Stage (Before_After)",
+    y = "Mean Max Daily Displacement"
+  ) +
+  theme_minimal()
 
 
 ```
@@ -1191,32 +1294,64 @@ balanced_data <- MHW_daily_distance_df %>%
 
 ### Depth Models 
 ```{r}
+hist(MHWs_fish_data$depth)
 # Log-transform depth to address skewness in distribution
-MHWs_fish_data$log_depth <- log(MHWs_fish_data$depth + 1) 
+MHWs_fish_data$log_depth <- log(MHWs_fish_data$depth + 1)
 hist(MHWs_fish_data$log_depth) # Check distribution post-transformation
 
 # Remove Serial_fish_id levels that have only NA values for depth
 MHWs_fish_data_dep_filtered <- MHWs_fish_data %>%
-  filter(!is.na(log_depth))
+  filter(!is.na(depth))
 
-unique(MHWs_fish_data_dep_filtered$Serial_fish_id)
+print(paste("number of fish before filter:",length(unique(MHWs_fish_data_dep_filtered$Serial_fish_id))))
+print(paste("number of MHWs before filter:",length(unique(MHWs_fish_data_dep_filtered$Serial))))
 
+
+# Add an "hour" column
+MHWs_fish_data_dep_filtered <- MHWs_fish_data_dep_filtered %>%
+  mutate(hour = hour(real_datetime)) 
 
 # Count the number of data points per date for each Serial_fish_id
-depth_counts <-  MHWs_fish_data_dep_filtered %>% 
-  group_by(Serial_fish_id,date) %>% 
-  summarise(n=n())
+hourly_depth_counts <-  MHWs_fish_data_dep_filtered %>% 
+  group_by(Serial_fish_id,date,hour,Before_After,species) %>% 
+  summarise(n=n(), .groups = "drop")
 
 # Compute the mean number of data points per Serial_fish_id
-mean_counts <- depth_counts %>%
+mean_counts <- hourly_depth_counts %>%
   group_by(Serial_fish_id) %>%
-  summarise(mean_count = mean(n), .groups = "drop")
+  summarise(mean_count = mean(n),
+                        prop_high_activity = mean(n > 2), .groups = "drop")
 
-# Filter out Serial_fish_id values with mean count less than 72, 3 detections per hour mean
+
+points_per_stage <- hourly_depth_counts %>%
+  group_by(Before_After,species) %>% 
+  summarise(n=n())
+
+# Boxplot
+ggplot(hourly_depth_counts, aes(x = as.factor(Serial_fish_id), y = n)) +
+    geom_boxplot(fill = "lightblue", color = "black") +
+    labs(title = "Boxplot of Hourly Counts per Serial Fish ID",
+         x = "Serial Fish ID",
+         y = "Hourly Data Count") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))  # Rotate x-axis labels for readability
+
+# Plot histogram 
+ggplot(hourly_depth_counts, aes(x = n)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "black", alpha = 0.7) +
+  facet_wrap(~Serial_fish_id, scales = "free") +  # Facet by fish ID
+  labs(title = "Hourly Counts per Serial Fish ID with Mean",
+       x = "Hourly Data Count",
+       y = "Frequency") +
+  theme_minimal()
+
+
+# Filter out Serial_fish_id values with mean count less than 4 detections per hour mean
 MHWs_fish_data_dep_filtered <- MHWs_fish_data_dep_filtered %>%
-  filter(Serial_fish_id %in% mean_counts$Serial_fish_id[mean_counts$mean_count >= 72])
+  filter(Serial_fish_id %in% mean_counts$Serial_fish_id[mean_counts$mean_count >= 2])
 
-unique(MHWs_fish_data_dep_filtered$Serial_fish_id)
+print(paste("number of fish after filter:",length(unique(MHWs_fish_data_dep_filtered$Serial_fish_id))))
+print(paste("number of MHWs after filter:",length(unique(MHWs_fish_data_dep_filtered$Serial))))
 
 
 # Create the histogram plot with facets for each Serial_fish_id
@@ -1249,28 +1384,109 @@ ggplot(MHWs_fish_data_dep_filtered, aes(x=real_datetime,y = depth)) +
     axis.text.x = element_text(angle = 45, hjust = 1)
   ) 
   
-results_depths <- automate_model_selection(MHWs_fish_data_dep_filtered, response_var = "log_depth", family = gaussian())
-
-appraise(results_depths$best_model)
-
-smooth_values <- plot_smooths(results_depths$best_model, series = DecimalTimeOfDay, comparison = Before_After)
-
-smooth_values$data$log_depth <- exp(smooth_values$data$log_depth) - 1
-smooth_values$data$CI_upper <- exp(smooth_values$data$CI_upper) - 1
-smooth_values$data$CI_lower <- exp(smooth_values$data$CI_lower) - 1
-
-smooth_values+
-  theme(legend.position = "top") +
-  theme_bw() +
-  scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
-  scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
-  # Optional: Adjust transparency of the CI fill (alpha)
-  theme(legend.position = "top")+
+simple_model_dep <- bam(log_depth ~ Before_After +s(DecimalTimeOfDay,by = Before_After,k=12,bs="cc") ,data = MHWs_fish_data_dep_filtered,family = "tw",knots = list(c(-0.5,24.5)),method = "REML")
+gratia::draw(simple_model_dep)
+summary(simple_model_dep)
+appraise(simple_model_dep)
+stage_effect <- predict_response(simple_model_dep, terms = c("DecimalTimeOfDay","Before_After"))
+stage_effect$predicted <- exp(stage_effect$predicted)  # Back-transform predictions
+stage_effect$conf.low <- exp(stage_effect$conf.low)    # Back-transform lower CI
+stage_effect$conf.high <- exp(stage_effect$conf.high)  # Back-transform upper CI
+ggplot(stage_effect, aes(x = x, y = predicted, color = group)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), alpha = 0.2) +
   scale_y_reverse()+
-  ylab("Depth [m]")+
-  xlab("Time of day")
+  theme_bw()+
+    ylab("Depth")+
+    xlab("Time of day")+
+    scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+    scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) 
 
-saveRDS(results_depths,"Red Sea/Results/Models/Depth_Models_OISST_detrended_Jacox.RDS")
+
+
+
+
+results_depths <- automate_model_selection(MHWs_fish_data_dep_filtered, response_var = "log_depth", family = gaussian())
+appraise(results_depths$best_model)
+summary(results_depths$best_model)
+gratia::draw(results_depths$best_model)
+emm <- emmeans(results_depths$best_model, ~ Before_After)
+
+daily_stage_effect <- predict_response(results_depths$best_model, terms = c("DecimalTimeOfDay","Before_After"),margin="simulate")
+print(daily_stage_effect)
+daily_stage_effect$predicted <- exp(daily_stage_effect$predicted)  # Back-transform predictions
+daily_stage_effect$conf.low <- exp(daily_stage_effect$conf.low)    # Back-transform lower CI
+daily_stage_effect$conf.high <- exp(daily_stage_effect$conf.high)  # Back-transform upper CI
+plot(daily_stage_effect) 
+ggplot(daily_stage_effect,aes(x=x,y=predicted))+
+  geom_line(aes(color=group))+
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), alpha = 0.2) +  # Confidence intervals
+   scale_y_reverse()+
+  theme_bw()+
+    ylab("Depth [m]")+
+    xlab("Time of day")+
+    labs(title= "Predicted values of depth")+
+    scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+    scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) 
+
+
+
+ind_stage_effect <- predict_response(results_depths$best_model, terms = c("DecimalTimeOfDay","Before_After","Serial_fish_id"))
+print(ind_stage_effect)
+ind_stage_effect$predicted <- exp(ind_stage_effect$predicted)  # Back-transform predictions
+ind_stage_effect$conf.low <- exp(ind_stage_effect$conf.low)    # Back-transform lower CI
+ind_stage_effect$conf.high <- exp(ind_stage_effect$conf.high)  # Back-transform upper CI
+ggplot(ind_stage_effect,aes(x=x,y=predicted))+
+  geom_line(aes(color=group))+
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), alpha = 0.2) +  # Confidence intervals
+   scale_y_reverse()+
+  facet_wrap(~facet)+
+  theme_bw()+
+    ylab("Depth [m]")+
+    xlab("Time of day")+
+    labs(title= "Predicted values of depth")+
+    scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+    scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) 
+
+stage_effect_only <- predict_response(results_depths$best_model, terms = c("Before_After"),margin="empirical")
+stage_effect_only$predicted <- exp(stage_effect_only$predicted)  # Back-transform predictions
+stage_effect_only$conf.low <- exp(stage_effect_only$conf.low)    # Back-transform lower CI
+stage_effect_only$conf.high <- exp(stage_effect_only$conf.high)  # Back-transform upper CI
+print(stage_effect_only)
+ggplot(stage_effect_only, aes(x=x, y = predicted)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2)+
+  theme_bw()+
+    ylab("Predicted Depth [m]")+
+    xlab("MHW stage")
+
+
+if ("species" %in% all.vars(formula(model))) {
+  Plot_with_species(results_depths$best_model,MHWs_fish_data_dep_filtered)
+} else
+{
+  # Plot_with_individuals(results_depths$best_model,MHWs_fish_data_dep_filtered)
+  # x <- predict_gam(results_depths$best_model,length_out = 24,exclude_terms = "s(Serial_fish_Id,bs='re')")
+  # plot(x,"DecimalTimeOfDay","Before_After")
+  dep_pred <- tidymv::get_gam_predictions(results_depths$best_model,series = DecimalTimeOfDay,exclude_random = F,transform = exp,exclude_terms = "s(Serial_fish_id)")
+  smooth_values <- plot_smooths(results_depths$best_model, series = DecimalTimeOfDay, comparison = Before_After,facet_terms = Serial_fish_id)
+
+  # Back-transformation
+  smooth_values$data$log_depth <- exp(smooth_values$data$log_depth) - 1
+  smooth_values$data$CI_upper <- exp(smooth_values$data$CI_upper) - 1
+  smooth_values$data$CI_lower <- exp(smooth_values$data$CI_lower) - 1
+
+  smooth_values+
+    theme(legend.position = "top") +
+    theme_bw() +
+    scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+    scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+    # Optional: Adjust transparency of the CI fill (alpha)
+    scale_y_reverse()+
+    ylab("Depth [m]")+
+    xlab("Time of day")
+}
+saveRDS(results_depths,"Red Sea/Results/Models/Depth_Models_Amazia_Fixbase.RDS")
 
 ```
 ### Activity models
@@ -1280,10 +1496,78 @@ hist(MHWs_fish_data$activity) # Check activity distribution
 # Remove Serial_fish_id levels that have only NA values for standerized_distance
 MHWs_fish_data_act_filtered <- MHWs_fish_data %>%
   filter(!is.na(activity))
-unique(MHWs_fish_data_act_filtered$Serial_fish_id)
-MHWs_fish_data_act_filtered %>% 
-  group_by(Serial_fish_id) %>% 
-  summarise(n=n())
+
+print(paste("number of fish before filter:", length(unique(MHWs_fish_data_act_filtered$Serial_fish_id))))
+print(paste("number of MHWs before filter:",length(unique(MHWs_fish_data_act_filtered$Serial))))
+
+MHWs_fish_data_act_filtered<- df %>%
+  filter(Serial_fish_id %in% valid_ids)
+
+# Add an "hour" column
+MHWs_fish_data_act_filtered <- MHWs_fish_data_act_filtered %>%
+  mutate(hour = hour(real_datetime)) 
+
+# Count the number of data points per date for each Serial_fish_id
+hourly_act_counts <-  MHWs_fish_data_act_filtered %>% 
+  group_by(Serial_fish_id,date,hour,Before_After,species) %>% 
+  summarise(n=n(), .groups = "drop")
+
+# Compute the mean number of data points per Serial_fish_id
+mean_counts <- hourly_act_counts %>%
+  group_by(Serial_fish_id) %>%
+  summarise(mean_count = mean(n),
+            prop_high_activity = mean(n > 2),.groups = "drop")
+
+# Boxplot
+ggplot(hourly_depth_counts, aes(x = as.factor(Serial_fish_id), y = n)) +
+    geom_boxplot(fill = "lightblue", color = "black") +
+    labs(title = "Boxplot of Hourly Counts per Serial Fish ID",
+         x = "Serial Fish ID",
+         y = "Hourly Data Count") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))  # Rotate x-axis labels for readability
+
+# Plot histogram 
+ggplot(hourly_depth_counts, aes(x = n)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "black", alpha = 0.7) +
+  facet_wrap(~Serial_fish_id, scales = "free") +  # Facet by fish ID
+  labs(title = "Hourly Counts per Serial Fish ID with Mean",
+       x = "Hourly Data Count",
+       y = "Frequency") +
+  theme_minimal()
+
+# Filter out Serial_fish_id values with mean count less than 4 detections per hour mean
+MHWs_fish_data_act_filtered <- MHWs_fish_data_act_filtered %>%
+  filter(Serial_fish_id %in% mean_counts$Serial_fish_id[mean_counts$mean_count >= 2]) 
+
+# Compute the number of data points per MHW stage
+points_per_stage <- MHWs_fish_data_act_filtered %>%
+  group_by(Before_After, Serial_fish_id) %>%
+  summarise(n = n()) %>%
+  ungroup()
+
+# Filter out MHW stages with less than 50 points
+filtered_points_per_stage <- points_per_stage %>%
+  filter(n >= 100)
+
+# Find Serial_fish_ids that have only one stage left after filtering
+fish_to_remove <- filtered_points_per_stage %>%
+  group_by(Serial_fish_id) %>%
+  summarise(stages_count = n_distinct(Before_After)) %>%
+  filter(stages_count == 1) %>%
+  pull(Serial_fish_id)
+
+# Filter the original dataset based on the remaining stages and exclude the fish with only one stage
+MHWs_fish_data_act_filtered <- MHWs_fish_data_act_filtered %>%
+  filter(Serial_fish_id %in% filtered_points_per_stage$Serial_fish_id) %>%
+  filter(!(Serial_fish_id %in% fish_to_remove))
+
+
+print(paste("number of fish after filter:",length(unique(MHWs_fish_data_act_filtered$Serial_fish_id))))
+print(paste("number of MHWs after filter:",length(unique(MHWs_fish_data_act_filtered$Serial))))
+
+
+
 # Create the histogram plot with facets for each Serial_fish_id
 ggplot(MHWs_fish_data_act_filtered, aes(x = activity)) +
   geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black", alpha = 0.7) +
@@ -1291,7 +1575,7 @@ ggplot(MHWs_fish_data_act_filtered, aes(x = activity)) +
   theme_minimal() +
   labs(
     title = "Histogram of Activity for Each Serial Fish ID",
-      x = "Activity",
+    x = "Activity",
     y = "Count"
   ) +
   theme(
@@ -1299,34 +1583,59 @@ ggplot(MHWs_fish_data_act_filtered, aes(x = activity)) +
     axis.text.x = element_text(angle = 45, hjust = 1)
   )
 # Create the timeline plot with facets for each Serial_fish_id
-ggplot(MHWs_fish_data_act_filtered, aes(x = real_datetime, y = activity)) +
-  # Add red background for MHW periods
-  geom_rect(data = MHWs_Eilat, 
-            aes(xmin = date_start, xmax = date_end, ymin = -Inf, ymax = Inf),
-            fill = "red", alpha = 0.2, inherit.aes = FALSE) + 
-  # Add scatter plot of fish activity
+ggplot(MHWs_fish_data_act_filtered, aes(x=real_datetime,y = activity)) +
   geom_point(fill = "skyblue", color = "black", alpha = 0.7) +
-  # Facet by Serial_fish_id
   facet_wrap(~ Serial_fish_id, scales = "free") +
-  scale_x_datetime(date_labels = "%d %b %Y") +  # Formats as "01 Jan 2024"
-  # Minimal theme
   theme_minimal() +
-  # Labels
   labs(
-    title = "Time series of Activity with Marine Heatwave Events",
+    title = "Time series of activity for Each Serial Fish ID",
     x = "Time",
     y = "Activity"
   ) +
-  # Adjust text appearance
   theme(
     strip.text = element_text(size = 10, face = "bold"),
     axis.text.x = element_text(angle = 45, hjust = 1)
-  )
+  ) 
+
 results_activity <- automate_model_selection(MHWs_fish_data_act_filtered, response_var = "activity", family = "tw")
 
 #diagnsotic plots for the winning
 appraise(results_activity$best_model)
+summary(results_activity$best_model)
 
+# Generate full prediction grid
+new_data <- expand.grid(
+  DecimalTimeOfDay = seq(0, 24, length.out = 100),  # Predict across a full day
+  Serial_fish_id = unique(MHWs_fish_data_act_filtered$Serial_fish_id),  # All fish
+  Before_After = c("Before", "MHW", "After")  # All conditions
+)
+
+# Keep only valid combinations that exist in the actual data
+existing_combinations <- MHWs_fish_data_act_filtered %>%
+  distinct(Serial_fish_id, Before_After)
+new_data <- new_data %>%
+  semi_join(existing_combinations, by = c("Serial_fish_id", "Before_After"))
+
+# Predict for valid combinations only
+new_data$predicted_activity <- predict(results_activity$best_model, newdata = new_data, type = "response", se.fit = TRUE)$fit
+new_data$se <- predict(results_activity$best_model, newdata = new_data, type = "response", se.fit = TRUE)$se.fit
+
+# Plot the predicted activity with 95% CI ribbons
+ggplot(new_data, aes(x = DecimalTimeOfDay, y = predicted_activity, color = Before_After)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = predicted_activity - 1.96 * se, ymax = predicted_activity + 1.96 * se, fill = Before_After), alpha = 0.3) +
+  facet_wrap(~ Serial_fish_id,scales="free_y") +
+  theme_minimal() +
+  labs(title = "Predicted Fish Activity Across Time of Day",
+       x = "Time of Day",
+       y = "Predicted Activity")+
+    scale_color_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
+    scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) 
+
+if ("species" %in% all.vars(formula(model))) {
+Plot_with_species(results_activity$best_model,MHWs_fish_data_act_filtered)
+} else
+{
 plot_smooths(results_activity$best_model, series = DecimalTimeOfDay, comparison = Before_After) + 
   theme(legend.position = "top") + 
   theme_bw() +
@@ -1334,7 +1643,7 @@ plot_smooths(results_activity$best_model, series = DecimalTimeOfDay, comparison 
   scale_fill_manual(values = c("MHW" = "red", "After" = "green", "Before" = "blue")) +
   # Optional: Adjust transparency of the CI fill (alpha)
   theme(legend.position = "top")
-
+}
 
 
 saveRDS(results_activity,"Red Sea/Results/Models/Act_Models_OISST_detrended_Jacox.RDS")

@@ -639,7 +639,7 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
       Add_Day_Period(MHW_Data) %>% 
       arrange(fish_id,real_datetime)
     
-    # Process data for different temporal window sizes
+    # Process data for different temporal window sizes - need to change the column numbers depend on the definition df
     for (window_size in c(23,27)) {
       start_window <-MHWs_Eilat[event,window_size]
       end_window <-MHWs_Eilat[event,window_size+2]
@@ -770,7 +770,6 @@ for (event_calc in 1:dim(nest_hw)[1]) {
         Period_of_day = rep(period, 3),                 # Repeat current period
         ln_activity_ratio = rep(NA, 3),                 # Placeholder for activity ratio
         delta_depth = rep(NA, 3),                       # Placeholder for depth change
-        delta_distance = rep(NA, 3),                    # Placeholder for distance change
         Stage_period = rep(NA, 3)                       # Placeholder for stage comparison label
       )
       
@@ -782,7 +781,6 @@ for (event_calc in 1:dim(nest_hw)[1]) {
                   {
                     temp_row$ln_activity_ratio[row_i] <- log(temp_period$activity_mean[temp_period$Before_After=="MHW"] /temp_period$activity_mean[temp_period$Before_After=="Before"])
                     temp_row$delta_depth[row_i] <- temp_period$depth_mean[temp_period$Before_After=="MHW"] - temp_period$depth_mean[temp_period$Before_After=="Before"]
-                    temp_row$delta_distance[row_i] <- abs(temp_period$distance_shore_mean[temp_period$Before_After=="MHW"]- temp_period$distance_shore_mean[temp_period$Before_After=="Before"])
                     temp_row$Stage_period[row_i] <- "MHW : Before" # Label the stage comparison
                     row_i <- row_i+1 # Increment row index
                   }

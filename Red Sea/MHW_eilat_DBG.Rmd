@@ -19,6 +19,7 @@ library(gratia)
 library(DataExplorer)
 library(ggeffects) # Plot gam effects
 library(rfishbase)
+library(ggpmisc) # plotting linear models with equations
 library(glatos) # for collision estimating
 ```
 
@@ -118,7 +119,7 @@ conditional_merge <- function(df1, df2, by_cols) {
   } else if (nrow(df2) == 0) {
     return(df1)
   } else {
-    return(merge(df1, df2, by = by_cols))
+    return(merge(df1, df2, by = by_cols,all= T))
   }
   
 }
@@ -603,21 +604,19 @@ MHWs_Eilat <- MHWs_Eilat_Fix_OISST  # Set the dataset to work with
 sum_heat_wave <- data.frame(fish_id=numeric(),
                             Before_After=character(),
                             Period=character(),
-                            activity_mean=numeric(),
-                            depth_mean=numeric(),
-                            distance_shore_mean=numeric(),
-                            activity_median=numeric(),
-                            depth_median=numeric(),
-                            distance_shore_median=numeric(),
-                            activity_sd=numeric(),
-                            depth_sd=numeric(),
-                            distance_shore_sd=numeric(),
-                            activity_sum=numeric(),
-                            depth_sum=numeric(),
-                            distance_shore_sum=numeric(),
+                            mean_activity=numeric(),
+                            sd_activity=numeric(),
+                            act_detections=numeric(),
                             Conf_int_activity=numeric(),
+                            mean_depth=numeric(),
+                            sd_depth=numeric(),
+                            dep_detections=numeric(),
                             Conf_int_depth=numeric(),
-                            Conf_int_distance_shore=numeric(),
+                            # distance_shore_mean=numeric(),
+                            # distance_shore_median=numeric(),
+                            # distance_shore_sd=numeric(),
+                            # distance_shore_sum=numeric(),
+                            # Conf_int_distance_shore=numeric(),
                             Serial=numeric(),
                             window_factor=numeric()
                             )
@@ -635,12 +634,12 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
     
     MHW_Data <- filter_fish %>%
       filter(date>= MHWs_Eilat$start_3[event] &  date<=MHWs_Eilat$end_3[event]) %>% 
-      Before_After_MHW(MHW_Data,MHWs_Eilat$date_start[event], MHWs_Eilat$date_end[event]) %>% 
-      Add_Day_Period(MHW_Data) %>% 
+      Before_After_MHW(.,MHWs_Eilat$date_start[event], MHWs_Eilat$date_end[event]) %>% 
+      Add_Day_Period(.) %>% 
       arrange(fish_id,real_datetime)
     
     # Process data for different temporal window sizes - need to change the column numbers depend on the definition df
-    for (window_size in c(23,27)) {
+    for (window_size in c(20,24)) {
       start_window <-MHWs_Eilat[event,window_size]
       end_window <-MHWs_Eilat[event,window_size+2]
       
@@ -649,7 +648,7 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
                                                 end_window)
       
       # Create hour bins and check for sufficient observations (> 4 observations)
-      obs_thrsh <- 4
+      obs_thrsh <- 2
       Windowed_MHW$hour_bin_code <- cut(Windowed_MHW$real_datetime,breaks = "1 hour")
       Windowed_MHW$hour_bin_code <-  paste(Windowed_MHW$fish_id,Windowed_MHW$hour_bin_code,Windowed_MHW$Period)
       bins_count <- Windowed_MHW %>%  
@@ -657,47 +656,44 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
         summarise(
         non_na_activity = sum(!is.na(activity)),
         non_na_depth = sum(!is.na(depth)),
-        non_na_distance_shore = sum(!is.na(standerized_distance))
         )
-      bins_count_act <- bins_count[bins_count$non_na_activity > obs_thrsh,]
-      bins_count_dep <- bins_count[bins_count$non_na_depth > obs_thrsh,]
-      bins_count_dis <- bins_count[bins_count$non_na_distance_shore > obs_thrsh,]
-      
+      bins_count_act <- bins_count[bins_count$non_na_activity >= obs_thrsh,] %>% select(hour_bin_code,non_na_activity)
+      bins_count_dep <- bins_count[bins_count$non_na_depth >= obs_thrsh,] %>% select(hour_bin_code,non_na_depth)
+
       # Calculate summary statistics for activity
       temp_sum_heat_wave_act <- Windowed_MHW %>%
         filter(hour_bin_code %in% bins_count_act$hour_bin_code)%>%
         group_by(fish_id,Before_After,Period) %>%
-        summarise_at(vars(activity),funs(mean(.,na.rm=T),
-                                 median(.,na.rm=T),
-                                 sd(.,na.rm=T),sum(!is.na(.)))) %>%
-        mutate(Conf_int_activity=sd/sqrt(sum) * qt(p=0.975,df=sum-1))
-      colnames(temp_sum_heat_wave_act)[4:7] <- paste("activity",colnames(temp_sum_heat_wave_act)[4:7],sep = "_")
+        summarise_at(vars(activity),funs(mean_activity = mean(.,na.rm=T),
+                                 sd_activity = sd(.,na.rm=T),act_detections = sum(!is.na(.)))) %>%
+        mutate(Conf_int_activity=sd_activity/sqrt(act_detections) * qt(p=0.975,df=act_detections-1))
+      temp_sum_heat_wave_act <- temp_sum_heat_wave_act[temp_sum_heat_wave_act$act_detections>50,]
       
       # Calculate summary statistics for depth
       temp_sum_heat_wave_dep <- Windowed_MHW %>%
         filter(hour_bin_code %in% bins_count_dep$hour_bin_code)%>%
         group_by(fish_id,Before_After,Period) %>%
-        summarise_at(vars(depth),funs(mean(.,na.rm=T),
-                                  median(.,na.rm=T),
-                                  sd(.,na.rm=T),sum(!is.na(.)))) %>%
-        mutate(Conf_int_depth=sd/sqrt(sum) * qt(p=0.975,df=sum-1))
-      colnames(temp_sum_heat_wave_dep)[4:7] <- paste("depth",colnames(temp_sum_heat_wave_dep)[4:7],sep = "_")
+        summarise_at(vars(depth),funs(mean_depth = mean(.,na.rm=T),
+                                  sd_depth = sd(.,na.rm=T),dep_detections = sum(!is.na(.)))) %>%
+        mutate(Conf_int_depth=sd_depth/sqrt(dep_detections) * qt(p=0.975,df=dep_detections-1))
+        temp_sum_heat_wave_dep <- temp_sum_heat_wave_dep[temp_sum_heat_wave_dep$dep_detections>50,]
+
 
       # Calculate summary statistics for distance to shore
-      temp_sum_heat_wave_dis <- Windowed_MHW %>% 
-        filter(hour_bin_code %in% bins_count_dis$hour_bin_code) %>%
-        group_by(fish_id,Before_After,Period) %>%
-        summarise_at(vars(standerized_distance),funs(mean(.,na.rm=T),
-                                           median(.,na.rm=T),
-                                           sd(.,na.rm=T),sum(!is.na(.)))) %>%
-        mutate(Conf_int_distance_shore=sd/sqrt(sum) * qt(p=0.975,df=sum-1))
-      colnames(temp_sum_heat_wave_dis)[4:7] <- paste("distance_shore",colnames(temp_sum_heat_wave_dis)[4:7],sep = "_")
+      # temp_sum_heat_wave_dis <- Windowed_MHW %>% 
+      #   filter(hour_bin_code %in% bins_count_dis$hour_bin_code) %>%
+      #   group_by(fish_id,Before_After,Period) %>%
+      #   summarise_at(vars(standerized_distance),funs(mean(.,na.rm=T),
+      #                                      median(.,na.rm=T),
+      #                                      sd(.,na.rm=T),sum(!is.na(.)))) %>%
+      #   mutate(Conf_int_distance_shore=sd/sqrt(sum) * qt(p=0.975,df=sum-1))
+      # colnames(temp_sum_heat_wave_dis)[4:7] <- paste("distance_shore",colnames(temp_sum_heat_wave_dis)[4:7],sep = "_")
       
      # Merge summary statistics for all metrics
-      temp_sum_heat_wave <- conditional_merge(temp_sum_heat_wave_dis,temp_sum_heat_wave_dep,c("fish_id","Before_After","Period"))
-      temp_sum_heat_wave <- conditional_merge(temp_sum_heat_wave,temp_sum_heat_wave_act,c("fish_id","Before_After","Period"))
+      # temp_sum_heat_wave <- conditional_merge(temp_sum_heat_wave_dis,temp_sum_heat_wave_dep,c("fish_id","Before_After","Period"))
+      temp_sum_heat_wave <- conditional_merge(temp_sum_heat_wave_dep,temp_sum_heat_wave_act,c("fish_id","Before_After","Period"))
       temp_sum_heat_wave$Serial <- MHWs_Eilat$Serial[event]
-      temp_sum_heat_wave$window_factor <- ifelse(window_size == 23, 1.5,3)
+      temp_sum_heat_wave$window_factor <- ifelse(window_size == 20, 1.5,3)
       temp_sum_heat_wave <- Fill_In_temp_sum_heat_wave(colnames(sum_heat_wave),temp_sum_heat_wave)
       
       # Append the processed data to the main summary dataframe
@@ -735,7 +731,7 @@ MHWs_stat <- data.frame(
   Period_of_day = character(),     # Period of the day (e.g., Dawn , Day)
   ln_activity_ratio = numeric(),   # Logarithmic ratio of activity levels between stages
   delta_depth = numeric(),         # Change in depth between stages
-  delta_distance = numeric(),      # Change in distance from shore between stages
+  # delta_distance = numeric(),      # Change in distance from shore between stages
   Stage_period = character()       # Describes the stage comparison (e.g., "MHW : Before")
 )
 
@@ -779,8 +775,8 @@ for (event_calc in 1:dim(nest_hw)[1]) {
       # Check and calculate metrics for "MHW : Before" stage comparison
                   if(all(c("MHW","Before") %in% uniqe_stages))
                   {
-                    temp_row$ln_activity_ratio[row_i] <- log(temp_period$activity_mean[temp_period$Before_After=="MHW"] /temp_period$activity_mean[temp_period$Before_After=="Before"])
-                    temp_row$delta_depth[row_i] <- temp_period$depth_mean[temp_period$Before_After=="MHW"] - temp_period$depth_mean[temp_period$Before_After=="Before"]
+                    temp_row$ln_activity_ratio[row_i] <- log(temp_period$mean_activity[temp_period$Before_After=="MHW"] /temp_period$mean_activity[temp_period$Before_After=="Before"])
+                    temp_row$delta_depth[row_i] <- temp_period$mean_depth[temp_period$Before_After=="MHW"] - temp_period$mean_depth[temp_period$Before_After=="Before"]
                     temp_row$Stage_period[row_i] <- "MHW : Before" # Label the stage comparison
                     row_i <- row_i+1 # Increment row index
                   }
@@ -788,10 +784,10 @@ for (event_calc in 1:dim(nest_hw)[1]) {
       # Check and calculate metrics for "After : MHW" stage comparison
                   if(all(c("After","MHW") %in% uniqe_stages))
                   {
-                     temp_row$ln_activity_ratio[row_i] <- log(temp_period$activity_mean[temp_period$Before_After=="After"]/temp_period$activity_mean[temp_period$Before_After=="MHW"])
-                     temp_row$delta_depth[row_i] <- temp_period$depth_mean[temp_period$Before_After=="After"] - temp_period$depth_mean[temp_period$Before_After=="MHW"]
-                     temp_row$delta_distance[row_i] <-
-                     abs(temp_period$distance_shore_mean[temp_period$Before_After=="After"] - temp_period$distance_shore_mean[temp_period$Before_After=="MHW"])
+                     temp_row$ln_activity_ratio[row_i] <- log(temp_period$mean_activity[temp_period$Before_After=="After"]/temp_period$mean_activity[temp_period$Before_After=="MHW"])
+                     temp_row$delta_depth[row_i] <- temp_period$mean_depth[temp_period$Before_After=="After"] - temp_period$mean_depth[temp_period$Before_After=="MHW"]
+                     # temp_row$delta_distance[row_i] <-
+                     # abs(temp_period$distance_shore_mean[temp_period$Before_After=="After"] - temp_period$distance_shore_mean[temp_period$Before_After=="MHW"])
                      temp_row$Stage_period[row_i] <- "After : MHW"
                     row_i <- row_i+1
                   }
@@ -799,10 +795,10 @@ for (event_calc in 1:dim(nest_hw)[1]) {
        # Check and calculate metrics for "After : Before" stage comparison
                   if(all(c("After","Before") %in% uniqe_stages))
                   {
-                    temp_row$ln_activity_ratio[row_i] <- log(temp_period$activity_mean[temp_period$Before_After=="After"]/temp_period$activity_mean[temp_period$Before_After=="Before"])
-                    temp_row$delta_depth[row_i] <- temp_period$depth_mean[temp_period$Before_After=="After"] - temp_period$depth_mean[temp_period$Before_After=="Before"]
-                    temp_row$delta_distance[row_i] <-
-                    abs(temp_period$distance_shore_mean[temp_period$Before_After=="After"] - temp_period$distance_shore_mean[temp_period$Before_After=="Before"])
+                    temp_row$ln_activity_ratio[row_i] <- log(temp_period$mean_activity[temp_period$Before_After=="After"]/temp_period$mean_activity[temp_period$Before_After=="Before"])
+                    temp_row$delta_depth[row_i] <- temp_period$mean_depth[temp_period$Before_After=="After"] - temp_period$mean_depth[temp_period$Before_After=="Before"]
+                    # temp_row$delta_distance[row_i] <-
+                    # abs(temp_period$distance_shore_mean[temp_period$Before_After=="After"] - temp_period$distance_shore_mean[temp_period$Before_After=="Before"])
                     temp_row$Stage_period[row_i] <- "After : Before"
                   }
       # Append the temporary row to the main results dataframe
@@ -812,7 +808,7 @@ for (event_calc in 1:dim(nest_hw)[1]) {
 }
 
 # Remove rows where all metrics (activity, depth, distance) are NA
-MHWs_stat <- MHWs_stat %>% filter(!(is.na(ln_activity_ratio) & is.na(delta_depth) & is.na(delta_distance)))
+MHWs_stat <- MHWs_stat %>% filter(!(is.na(ln_activity_ratio) & is.na(delta_depth)))
 
 # Merge with heatwave metadata
 ############ Choose the name of the basedataset and def #############
@@ -829,6 +825,92 @@ write.csv(MHWs_stat,paste("Red Sea/Results/Individual Heatwaves/Eilat_MHWs_Stat_
 ```
 
 
+
+# MHW stats graphs and lm
+```{r}
+MHWs_stat_lm <- MHWs_stat %>% filter(window_factor==1.5)
+
+hist(MHWs_stat_lm$ln_activity_ratio)
+lm_act<- lm(ln_activity_ratio ~ intensity_cumulative*Stage_period,data = MHWs_stat_lm)
+gratia::appraise(lm_act)
+summary(lm_act)
+
+# Make sure factor levels are in correct order
+MHWs_stat_lm$Stage_period <- factor(MHWs_stat_lm$Stage_period,
+                                 levels = c("MHW : Before", "After : Before", "After : MHW"))
+
+# Step 1: Summarize n per group
+# Summary stats for label positioning
+n_df_act <- MHWs_stat_lm %>%
+  group_by(Stage_period, intensity_cumulative) %>%
+  filter(!is.na(ln_activity_ratio)) %>% 
+  summarise(n = n(),
+            mean_ln = mean(ln_activity_ratio, na.rm = TRUE),
+            .groups = "drop") 
+
+ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = ln_activity_ratio)) +
+  stat_summary(fun = mean, geom = "point", size = 2, color = "black") +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = 0.2, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred", linewidth = 1) +
+  stat_poly_eq(
+    aes(label = paste(..eq.label.., ..rr.label.., ..p.value.label.., sep = "~~~")),
+    formula = y ~ x,
+    parse = TRUE,
+    label.x = "center",
+    label.y = 0.9,
+    size = 4,
+    color = "black"
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_text(data = n_df_act, aes(x = intensity_cumulative, y=-Inf ,angle = 90, label = n),
+            inherit.aes = FALSE, size = 3, fontface = "bold",hjust=-2) +
+  facet_wrap(~ Stage_period) +
+  labs(
+    x = "Cumulative Intensity",
+    y = "ln(Activity Ratio)"
+  ) +
+  theme_bw()
+
+hist(MHWs_stat_lm$delta_depth)
+
+lm_dep<- lm(delta_depth ~ intensity_cumulative*Stage_period,data = MHWs_stat_lm)
+gratia::appraise(lm_dep)
+summary(lm_dep)
+
+# Step 1: Summarize n per group
+# Summary stats for label positioning
+n_df_dep <- MHWs_stat_lm %>%
+  group_by(Stage_period, intensity_cumulative) %>%
+  filter(!is.na(delta_depth)) %>% 
+  summarise(n = n(),
+            mean_ln = mean(delta_depth, na.rm = TRUE),
+            .groups = "drop") 
+
+ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = delta_depth)) +
+  stat_summary(fun = mean, geom = "point", size = 2, color = "black") +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = 0.2, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred", linewidth = 1) +
+  stat_poly_eq(
+    aes(label = paste(..eq.label.., ..rr.label.., ..p.value.label.., sep = "~~~")),
+    formula = y ~ x,
+    parse = TRUE,
+    label.x = "center",
+    label.y = 0.9,
+    size = 4,
+    color = "black"
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_text(data = n_df_dep, aes(x = intensity_cumulative, y=-Inf ,angle = 90, label = n),
+            inherit.aes = FALSE, size = 3, fontface = "bold",hjust=-2) +
+  facet_wrap(~ Stage_period) +
+  labs(
+    x = "Cumulative Intensity",
+    y = "Delta depth [m])"
+  ) +
+  theme_bw()
+
+
+```
 
 ## Extract Fish temp preference from FishBase
 ```{r}

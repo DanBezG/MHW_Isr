@@ -20,6 +20,7 @@ library(DataExplorer)
 library(ggeffects) # Plot gam effects
 library(rfishbase)
 library(ggpmisc) # plotting linear models with equations
+library(svglite) # save svg with ggplot
 library(glatos) # for collision estimating
 ```
 
@@ -473,7 +474,117 @@ for (sp_i in bioblitz_df) {
 ```
 
 
+# Fish thermal
+## Extract Fish temp preference from FishBase
+```{r}
+for (species in unique(tags_metadata_parrot$species)) {
+  if (!is.na(species)) {
+    min <- estimate(species)$TempPrefMin
+      max <- estimate(species)$TempPrefMax
+      mean <- estimate(species)$TempPrefMean
+      tags_metadata_parrot$minTemp[tags_metadata_parrot$species==species] <- min
+      tags_metadata_parrot$maxTemp[tags_metadata_parrot$species==species] <- max
+      tags_metadata_parrot$meanTemp[tags_metadata_parrot$species==species] <- mean
+  }
+      
+}
+
+```
+
+
+
+
+
+## Estimate thermal niche edges - Bioblitz till 2023 based
+```{r}
+surveys_data <- read.csv("Red Sea/May surveys data/Full_data.csv")
+species_list <- c("Chlorurus sordidus","Scarus fuscopurpureus","Scarus niger","Chlorurus gibbus")
+surveys_data <- surveys_data %>% filter(Species %in% species_list)
+surveys_data$Date <- as.Date(surveys_data$Date)
+survey_temps <- read.xlsx("Red Sea/May surveys data/Temps.xlsx")
+survey_temps$Date <- as.Date(survey_temps$Date,origin = "1899-12-30") ## IUI meteorological 24 hours
+surveys_data <- merge(surveys_data,survey_temps,by="Date")
+temp_range <- data.frame(Species=unique(surveys_data$Species),
+                         max_t=NA,
+                         min_t=NA)
+for (specie in unique(surveys_data$Species)) {
+  temp_specie <- surveys_data %>% filter(Species==specie)
+  temp_range$max_t[temp_range$Species==specie] <- max(temp_specie$Temp.max)
+  temp_range$min_t[temp_range$Species==specie] <- min(temp_specie$Temp.min)
+}
+```
+
+
 # Data analysis
+## Compare IUI temp and TBR
+```{r}
+sst_IUI_10_min <- read.csv("Red Sea/Eilat climetology/IUI/SST_Eilat_IUI_10min.csv")
+TBR_data <- read.csv("Red Sea/TBR data/All TBR sensor data - All TB acoustic files.csv")
+# Formatting SST IUI 10 min
+sst_IUI_10_min$DateTime <- as.POSIXct(sst_IUI_10_min$DateTime,format="%d/%m/%Y %H:%M:%S",tz = "Asia/Jerusalem")
+sst_IUI_10_min <- sst_IUI_10_min %>% select(-Comments)
+# Formatting TBR_Meta
+TBR_metadata <- read.csv("Red Sea/TBR data/all stations from EPIC - Yuval.csv")
+TBR_metadata <- TBR_metadata %>% select(rec,rec_z,period_start)
+TBR_metadata <- TBR_metadata %>% rename("Receiver"="rec")
+TBR_metadata <- TBR_metadata[!duplicated(TBR_metadata),]
+TBR_metadata$rec_z <- ifelse(TBR_metadata$rec_z=="",NA,TBR_metadata$rec_z)
+TBR_metadata <- na.omit(TBR_metadata)
+TBR_metadata$period_start <- as.Date(TBR_metadata$period_start,format = "%d/%m/%Y")
+TBR_metadata <- TBR_metadata[with(TBR_metadata,order(Receiver,period_start)),]
+
+# Formatting TBR_data
+TBR_data$Date.and.Time_2GMT <- as.POSIXct(TBR_data$Date.and.Time..UTC.,format="%Y-%m-%dT%H:%M:%S",tz = "UTC")
+TBR_data$Date.and.Time_2GMT <- with_tz(TBR_data$Date.and.Time_2GMT,tzone="Asia/Jerusalem")
+TBR_data <- TBR_data %>% select(Date.and.Time..UTC.,Date.and.Time_2GMT,Temperature..degC.,Receiver)
+dates <- c(unique(fish_df$date),unique(parrotfish_data$date))
+TBR_data$date <- as.Date(format(TBR_data$Date.and.Time_2GMT),tz="Asia/Jerusalem")
+TBR_data <- TBR_data %>% filter(date %in% dates)
+TBR_data$Serial <- 1:nrow(TBR_data)
+TBR_data$depth <- NA
+
+#Merging depth to TBR_data - stated here and continued manually in excel using xlookup
+for (rec in unique(TBR_metadata$Receiver)) {
+  temp_rec_meta <- TBR_metadata %>% filter(Receiver==rec)
+  temp_rec_data <- TBR_data %>% filter(Receiver==rec)
+  temp_rec_data <- temp_rec_data %>%
+    arrange(Date.and.Time_2GMT) %>% 
+    mutate(time_diff=c(NA,diff(Date.and.Time_2GMT))) %>%
+    filter(time_diff==600)
+  wb <- createWorkbook()
+  addWorksheet(wb,"temp_rec_data")
+  writeData(wb,"temp_rec_data",temp_rec_data)
+  addWorksheet(wb,"temp_rec_meta")
+  writeData(wb,"temp_rec_meta",temp_rec_meta)
+  saveWorkbook(wb,paste("Red Sea/TBR data/Depth assigment/",rec,".xlsx"),overwrite = T)
+
+  }
+
+## Continue after Excel
+file_list <- list.files(path = "Red Sea/TBR data/Depth assigment/", full.names = TRUE)
+data_list <- list()
+for (file_num in 1:length(file_list)) {
+  data_list[[file_num]] <- read.xlsx(file_list[file_num],sheet="temp_rec_data")
+}
+data_list <- bind_rows(data_list)
+data_list <- data_list %>% rename("DateTime"="Date.and.Time_2GMT")
+data_list$DateTime <- as.POSIXct(data_list$Date.and.Time..UTC.,format="%Y-%m-%dT%H:%M:%S",tz = "UTC")
+data_list$DateTime <- with_tz(data_list$DateTime,tzone="Asia/Jerusalem")
+
+data_list <- merge(data_list,sst_IUI_10_min,by="DateTime")
+write.csv(data_list,"Red Sea/TBR data/TBR_depth_SST.csv")
+
+## Checking the deepest TBR
+data_list_deep <-data_list %>% filter(depth==7.6) 
+ggplot(data_list_deep)+
+  geom_point(aes(x=DateTime,y=Temperature..degC.))
+
+ggplot(data_list_deep)+
+  geom_point(aes(x=Average.temp,y=Temperature..degC.))
+```
+
+
+
 ## load data
 ```{r}
 # Fish data 2016-2018
@@ -598,7 +709,7 @@ MHWs_Eilat_Fix_Amazia <- MHWs_Eilat_Fix_Amazia %>% relocate(Serial,.before = dat
 ## Calculate Each MHW summary - Need to choose dataset and change file names first!!
 ```{r}
 ####### Choose which dataset to work on through MHWs_Eilat ###########
-MHWs_Eilat <- MHWs_Eilat_Fix_OISST  # Set the dataset to work with
+MHWs_Eilat <- MHWs_Eilat_Moving_OISST  # Set the dataset to work with
 
 #prepare the fish-MHWs summary dataframe 
 sum_heat_wave <- data.frame(fish_id=numeric(),
@@ -647,7 +758,7 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
       Windowed_MHW <- MHW_Data %>% filter(date >= start_window & date<= 
                                                 end_window)
       
-      # Create hour bins and check for sufficient observations (> 4 observations)
+      # Create hour bins and check for sufficient observations (> 2 observations)
       obs_thrsh <- 2
       Windowed_MHW$hour_bin_code <- cut(Windowed_MHW$real_datetime,breaks = "1 hour")
       Windowed_MHW$hour_bin_code <-  paste(Windowed_MHW$fish_id,Windowed_MHW$hour_bin_code,Windowed_MHW$Period)
@@ -706,6 +817,11 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
 # Reorganize columns in the summary dataframe
 sum_heat_wave <- sum_heat_wave %>% relocate(Serial,.before = fish_id)
 sum_heat_wave <- sum_heat_wave %>% relocate(window_factor,.before = fish_id)
+
+# Add species information from the metadata
+stat_tags_metadata_parrot <- tags_metadata_parrot %>% 
+  select(fish_id,species) 
+sum_heat_wave <- distinct(merge(sum_heat_wave,stat_tags_metadata_parrot,by = "fish_id"))
 
 ############ Save the summary data 
 ############ Choose the name of the basedataset and def #############
@@ -821,17 +937,28 @@ MHWs_stat <- distinct(merge(MHWs_stat,stat_tags_metadata_parrot,by = "fish_id"))
 
 # Save the final results to CSV 
 ############ Choose the name of the basedataset and def #############
-write.csv(MHWs_stat,paste("Red Sea/Results/Individual Heatwaves/Eilat_MHWs_Stat_Amazia_Fixbase_MHW_Stage_Avg_long",Sys.Date(),".csv"))
+write.csv(MHWs_stat,paste("Red Sea/Results/Individual Heatwaves/MHWs_Stat_Amazia_Fixbase_MHW_Stage_Avg_long",Sys.Date(),".csv"))
 ```
 
 
 
-# MHW stats graphs and lm
+## MHW stats graphs and lm
 ```{r}
-MHWs_stat_lm <- MHWs_stat %>% filter(window_factor==1.5)
+
+## Activity 
+
+# Only MHW:Before
+MHWs_stat_lm <- MHWs_stat %>% filter(window_factor==1.5 & Stage_period=="After : MHW" )
+
+## Several stage period
+# MHWs_stat_lm <- MHWs_stat %>% filter(window_factor==1.5 & (Stage_period=="MHW : Before" | Stage_period=="After : MHW"))
+
+# Make sure factor levels are in correct order
+sum_heat_wave$Before_After <- factor(sum_heat_wave$Before_After,
+                                 levels = c("Before", "MHW", "After"))
 
 hist(MHWs_stat_lm$ln_activity_ratio)
-lm_act<- lm(ln_activity_ratio ~ intensity_cumulative*Stage_period,data = MHWs_stat_lm)
+lm_act<- lm(ln_activity_ratio ~ intensity_cumulative,data = MHWs_stat_lm)
 gratia::appraise(lm_act)
 summary(lm_act)
 
@@ -839,16 +966,17 @@ summary(lm_act)
 MHWs_stat_lm$Stage_period <- factor(MHWs_stat_lm$Stage_period,
                                  levels = c("MHW : Before", "After : Before", "After : MHW"))
 
+
 # Step 1: Summarize n per group
 # Summary stats for label positioning
 n_df_act <- MHWs_stat_lm %>%
-  group_by(Stage_period, intensity_cumulative) %>%
+  group_by(intensity_cumulative) %>%
   filter(!is.na(ln_activity_ratio)) %>% 
   summarise(n = n(),
             mean_ln = mean(ln_activity_ratio, na.rm = TRUE),
             .groups = "drop") 
 
-ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = ln_activity_ratio)) +
+act_reg_plot <- ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = ln_activity_ratio)) +
   stat_summary(fun = mean, geom = "point", size = 2, color = "black") +
   stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = 0.2, color = "black") +
   geom_smooth(method = "lm", se = TRUE, color = "darkred", linewidth = 1) +
@@ -862,31 +990,107 @@ ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = ln_activity_ratio)) +
     color = "black"
   ) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
-  geom_text(data = n_df_act, aes(x = intensity_cumulative, y=-Inf ,angle = 90, label = n),
-            inherit.aes = FALSE, size = 3, fontface = "bold",hjust=-2) +
-  facet_wrap(~ Stage_period) +
+  geom_text(data = n_df_act, aes(x = intensity_cumulative, y=Inf , label = n),
+            inherit.aes = FALSE, size = 3, fontface = "bold",vjust=2) +
+  # facet_wrap(~ Stage_period) +
   labs(
     x = "Cumulative Intensity",
     y = "ln(Activity Ratio)"
   ) +
   theme_bw()
 
-hist(MHWs_stat_lm$delta_depth)
 
-lm_dep<- lm(delta_depth ~ intensity_cumulative*Stage_period,data = MHWs_stat_lm)
+# Filter out rows with NA activity
+sum_heat_wave_act <- sum_heat_wave %>%
+  filter(!is.na(mean_activity) & window_factor==1.5 )
+
+
+# Plot
+act_symbol_compare_plot <- ggplot(sum_heat_wave_act, aes(x = Before_After, y = mean_activity)) +
+  geom_boxplot(aes(fill = Before_After),alpha = 0.7,show.legend = FALSE) +
+  scale_fill_manual(values = c("Before" = "forestgreen",
+                               "MHW" = "red",
+                               "After" = "dodgerblue"))+
+  scale_shape_manual(values = c("Dawn" = 2,
+                                "Day" = 8,
+                                "Dusk" = 0,
+                                "Night" = 3)) +
+  geom_jitter(aes(shape = Period),position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),size=2.5)+
+    # geom_jitter(aes(shape = Period),size=2.5)+
+  # facet_wrap(~species,scales="free_y")+
+  
+  # Add mean points and CI
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 18, # Diamond shape
+    size = 4,
+    color = "black"
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "errorbar",
+    width = 0.1,
+    color = "black",
+    linewidth = 0.8
+  ) +
+  labs(
+    x = "Stage",
+    y = "Mean Activity"
+  ) +
+  theme_bw() +
+  theme(legend.position = "top")
+ggsave("Red Sea/Results/Plots/act_symb_compare_plot_Amazia_Fix.svg", act_symbol_compare_plot, width = 12, height = 10)
+
+
+# Plot - color instead of shapes
+color_compare_plot <- ggplot(sum_heat_wave_act, aes(x = Before_After, y = mean_activity)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_color_manual(values = c("Dawn" = "#DAA520",
+                              "Day" = "#4682B4",
+                              "Dusk" = "#BA55D3",
+                              "Night" = "#708090")) +
+  geom_jitter(aes(color = Period),size=2,shape=17)+
+  
+  # Add mean points and CI
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 18, # Diamond shape
+    size = 6,
+    color = "black"
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "errorbar",
+    width = 0.1,
+    color = "black",
+    linewidth = 0.8
+  ) +
+  labs(
+    x = "Stage",
+    y = "Mean Activity"
+  ) +
+  theme_bw() 
+
+act_com_plot <- act_symbol_compare_plot+act_reg_plot + plot_layout(widths = c(2,4))
+
+## Depth
+
+lm_dep<- lm(delta_depth ~ intensity_cumulative,data = MHWs_stat_lm)
 gratia::appraise(lm_dep)
 summary(lm_dep)
 
 # Step 1: Summarize n per group
 # Summary stats for label positioning
 n_df_dep <- MHWs_stat_lm %>%
-  group_by(Stage_period, intensity_cumulative) %>%
+  group_by(intensity_cumulative) %>%
   filter(!is.na(delta_depth)) %>% 
   summarise(n = n(),
             mean_ln = mean(delta_depth, na.rm = TRUE),
             .groups = "drop") 
 
-ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = delta_depth)) +
+dep_reg_plot <- ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = delta_depth)) +
   stat_summary(fun = mean, geom = "point", size = 2, color = "black") +
   stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = 0.2, color = "black") +
   geom_smooth(method = "lm", se = TRUE, color = "darkred", linewidth = 1) +
@@ -900,124 +1104,62 @@ ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = delta_depth)) +
     color = "black"
   ) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
-  geom_text(data = n_df_dep, aes(x = intensity_cumulative, y=-Inf ,angle = 90, label = n),
-            inherit.aes = FALSE, size = 3, fontface = "bold",hjust=-2) +
-  facet_wrap(~ Stage_period) +
+  geom_text(data = n_df_dep, aes(x = intensity_cumulative, y=Inf , label = n),
+            inherit.aes = FALSE, size = 3, fontface = "bold",vjust=2) +
   labs(
     x = "Cumulative Intensity",
     y = "Delta depth [m])"
   ) +
   theme_bw()
 
+# Filter out rows with NA depth
+sum_heat_wave_dep <- sum_heat_wave %>%
+  filter(!is.na(mean_depth) & window_factor==1.5 )
+
+# Plot
+dep_symbol_compare_plot <- ggplot(sum_heat_wave_dep, aes(x = Before_After, y = mean_depth)) +
+  geom_boxplot(aes(fill = Before_After),alpha = 0.7,show.legend = FALSE) +
+  scale_fill_manual(values = c("Before" = "forestgreen",
+                               "MHW" = "red",
+                               "After" = "dodgerblue"))+
+  scale_shape_manual(values = c("Dawn" = 2,
+                                "Day" = 8,
+                                "Dusk" = 0,
+                                "Night" = 3)) +
+  # facet_wrap(~species,scales="free_y")+
+  geom_jitter(aes(shape = Period),position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),size=2.5)+
+  
+  # Add mean points and CI
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 18, # Diamond shape
+    size = 4,
+    color = "black"
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "errorbar",
+    width = 0.1,
+    color = "black",
+    linewidth = 0.8
+  ) +
+  labs(
+    x = "Stage",
+    y = "Mean Depth [m]"
+  ) +
+  theme_bw() +
+  theme(legend.position = "top")
+ggsave("Red Sea/Results/Plots/dep_symb_compare_plot_Amazia_Fix.svg", dep_symbol_compare_plot, width = 12, height = 10)
+
+dep_com_plot <- dep_symbol_compare_plot+dep_reg_plot + plot_layout(widths = c(2,4))
+ggs
+full_plot <- act_com_plot / dep_com_plot
+
+ggsave("Red Sea/Results/Plots/act_dep_compare_plot_OISST_Fix.svg", full_plot, width = 12, height = 10)
 
 ```
 
-## Extract Fish temp preference from FishBase
-```{r}
-for (species in unique(tags_metadata_parrot$species)) {
-  if (!is.na(species)) {
-    min <- estimate(species)$TempPrefMin
-      max <- estimate(species)$TempPrefMax
-      mean <- estimate(species)$TempPrefMean
-      tags_metadata_parrot$minTemp[tags_metadata_parrot$species==species] <- min
-      tags_metadata_parrot$maxTemp[tags_metadata_parrot$species==species] <- max
-      tags_metadata_parrot$meanTemp[tags_metadata_parrot$species==species] <- mean
-  }
-      
-}
-
-```
-
-
-
-
-
-## Compare IUI temp and TBR
-```{r}
-sst_IUI_10_min <- read.csv("Red Sea/Eilat climetology/IUI/SST_Eilat_IUI_10min.csv")
-TBR_data <- read.csv("Red Sea/TBR data/All TBR sensor data - All TB acoustic files.csv")
-# Formatting SST IUI 10 min
-sst_IUI_10_min$DateTime <- as.POSIXct(sst_IUI_10_min$DateTime,format="%d/%m/%Y %H:%M:%S",tz = "Asia/Jerusalem")
-sst_IUI_10_min <- sst_IUI_10_min %>% select(-Comments)
-# Formatting TBR_Meta
-TBR_metadata <- read.csv("Red Sea/TBR data/all stations from EPIC - Yuval.csv")
-TBR_metadata <- TBR_metadata %>% select(rec,rec_z,period_start)
-TBR_metadata <- TBR_metadata %>% rename("Receiver"="rec")
-TBR_metadata <- TBR_metadata[!duplicated(TBR_metadata),]
-TBR_metadata$rec_z <- ifelse(TBR_metadata$rec_z=="",NA,TBR_metadata$rec_z)
-TBR_metadata <- na.omit(TBR_metadata)
-TBR_metadata$period_start <- as.Date(TBR_metadata$period_start,format = "%d/%m/%Y")
-TBR_metadata <- TBR_metadata[with(TBR_metadata,order(Receiver,period_start)),]
-
-# Formatting TBR_data
-TBR_data$Date.and.Time_2GMT <- as.POSIXct(TBR_data$Date.and.Time..UTC.,format="%Y-%m-%dT%H:%M:%S",tz = "UTC")
-TBR_data$Date.and.Time_2GMT <- with_tz(TBR_data$Date.and.Time_2GMT,tzone="Asia/Jerusalem")
-TBR_data <- TBR_data %>% select(Date.and.Time..UTC.,Date.and.Time_2GMT,Temperature..degC.,Receiver)
-dates <- c(unique(fish_df$date),unique(parrotfish_data$date))
-TBR_data$date <- as.Date(format(TBR_data$Date.and.Time_2GMT),tz="Asia/Jerusalem")
-TBR_data <- TBR_data %>% filter(date %in% dates)
-TBR_data$Serial <- 1:nrow(TBR_data)
-TBR_data$depth <- NA
-
-#Merging depth to TBR_data - stated here and continued manually in excel using xlookup
-for (rec in unique(TBR_metadata$Receiver)) {
-  temp_rec_meta <- TBR_metadata %>% filter(Receiver==rec)
-  temp_rec_data <- TBR_data %>% filter(Receiver==rec)
-  temp_rec_data <- temp_rec_data %>%
-    arrange(Date.and.Time_2GMT) %>% 
-    mutate(time_diff=c(NA,diff(Date.and.Time_2GMT))) %>%
-    filter(time_diff==600)
-  wb <- createWorkbook()
-  addWorksheet(wb,"temp_rec_data")
-  writeData(wb,"temp_rec_data",temp_rec_data)
-  addWorksheet(wb,"temp_rec_meta")
-  writeData(wb,"temp_rec_meta",temp_rec_meta)
-  saveWorkbook(wb,paste("Red Sea/TBR data/Depth assigment/",rec,".xlsx"),overwrite = T)
-
-  }
-
-## Continue after Excel
-file_list <- list.files(path = "Red Sea/TBR data/Depth assigment/", full.names = TRUE)
-data_list <- list()
-for (file_num in 1:length(file_list)) {
-  data_list[[file_num]] <- read.xlsx(file_list[file_num],sheet="temp_rec_data")
-}
-data_list <- bind_rows(data_list)
-data_list <- data_list %>% rename("DateTime"="Date.and.Time_2GMT")
-data_list$DateTime <- as.POSIXct(data_list$Date.and.Time..UTC.,format="%Y-%m-%dT%H:%M:%S",tz = "UTC")
-data_list$DateTime <- with_tz(data_list$DateTime,tzone="Asia/Jerusalem")
-
-data_list <- merge(data_list,sst_IUI_10_min,by="DateTime")
-write.csv(data_list,"Red Sea/TBR data/TBR_depth_SST.csv")
-
-## Checking the deepest TBR
-data_list_deep <-data_list %>% filter(depth==7.6) 
-ggplot(data_list_deep)+
-  geom_point(aes(x=DateTime,y=Temperature..degC.))
-
-ggplot(data_list_deep)+
-  geom_point(aes(x=Average.temp,y=Temperature..degC.))
-```
-
-
-## Estimate thermal niche edges - Bioblitz till 2023 based
-```{r}
-surveys_data <- read.csv("Red Sea/May surveys data/Full_data.csv")
-species_list <- c("Chlorurus sordidus","Scarus fuscopurpureus","Scarus niger","Chlorurus gibbus")
-surveys_data <- surveys_data %>% filter(Species %in% species_list)
-surveys_data$Date <- as.Date(surveys_data$Date)
-survey_temps <- read.xlsx("Red Sea/May surveys data/Temps.xlsx")
-survey_temps$Date <- as.Date(survey_temps$Date,origin = "1899-12-30") ## IUI meteorological 24 hours
-surveys_data <- merge(surveys_data,survey_temps,by="Date")
-temp_range <- data.frame(Species=unique(surveys_data$Species),
-                         max_t=NA,
-                         min_t=NA)
-for (specie in unique(surveys_data$Species)) {
-  temp_specie <- surveys_data %>% filter(Species==specie)
-  temp_range$max_t[temp_range$Species==specie] <- max(temp_specie$Temp.max)
-  temp_range$min_t[temp_range$Species==specie] <- min(temp_specie$Temp.min)
-}
-```
 
 ## GAM
 ### Data exploration
@@ -1211,6 +1353,7 @@ MHWs_Eilat$date_end <- as.POSIXct(MHWs_Eilat$date_end)
 
 MHWs_fish_data$Before_After <- factor(MHWs_fish_data$Before_After,levels = c("Before", "MHW", "After"))
 MHWs_fish_data$Before_After <- relevel(MHWs_fish_data$Before_After,ref="Before")
+
   
 ```
 
@@ -1218,69 +1361,90 @@ MHWs_fish_data$Before_After <- relevel(MHWs_fish_data$Before_After,ref="Before")
 ```{r}
 MHW_daily_distance_df <- MHWs_fish_data 
 MHW_daily_distance_df <- MHW_daily_distance_df %>%
-  mutate(hour = hour(real_datetime)) %>%      # Extract hour
-  relocate(hour,.after = date)
+  mutate(hour = hour(real_datetime)) %>%     # Extract hour
+  Add_Day_Period(.) %>% 
+  arrange(fish_id,real_datetime) %>%
+  mutate(solar_date = case_when(
+      Period == "Night" & hour < 12 ~ date - 1,  # Early Night (after midnight) → subtract 1 day
+      TRUE ~ date  # Otherwise keep the same
+    )) %>% 
+  relocate(hour,Period,solar_date,.after = date) %>% 
+  ungroup()
 
 MHW_daily_distance_df <- MHW_daily_distance_df %>%
-  group_by(Serial_fish_id, date) %>%
+  group_by(Serial_fish_id, solar_date) %>%
   filter(!all(is.na(distance_shore))) %>%
   summarise(
+    n = n(),
     # Max daily displacement: median of the top 10% - median of the bottom 10%
     max_daily_displacement = {
       sorted_distances <- sort(distance_shore, na.last = NA)
       n <- length(sorted_distances)
-      top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
-      bottom_10_percent <- sorted_distances[1:floor(0.1 * n)]
-      abs(median(top_10_percent, na.rm = TRUE) - median(bottom_10_percent, na.rm = TRUE))
+      ifelse(n>50,
+             {
+              top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
+              bottom_10_percent <- sorted_distances[1:floor(0.1 * n)]
+              abs(median(top_10_percent, na.rm = TRUE) - median(bottom_10_percent,
+                                                                na.rm = TRUE))         
+              }
+      ,NA)
+      
     },
 
-    # Night counts (hour between 0:00 and 5:00)
-    night_count = sum(hour >= 0 & hour < 5),
+    # Night counts (hour between 22:00 and 4:00)
+    night_count = sum(hour >= 22 | hour < 4),
 
     # Night displacement for 5
-    night_median_5 = if_else(
-      night_count > 5,
-      median(distance_shore[hour >= 0 & hour < 5], na.rm = TRUE),
+    night_median_6 = if_else(
+      night_count > 6,
+      median(distance_shore[hour >= 22 | hour < 4], na.rm = TRUE),
       NA_real_
     ),
-    night_displacement_5 =
+    night_displacement_6 =
       {
-      sorted_distances <- sort(distance_shore, na.last = NA)
+      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | Period ==
+                                           "Dawn"]
+      sorted_distances <- sort(filter_distances, na.last = NA)
       n <- length(sorted_distances)
       top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
-      abs(top_10_percent - night_median_5)
+      abs(top_10_percent - night_median_6)
       }
     ,
 
     # Night displacement for 10
-    night_median_10 = if_else(
-      night_count > 10,
-      median(distance_shore[hour >= 0 & hour < 5], na.rm = TRUE),
+    night_median_12 = if_else(
+      night_count > 12,
+      median(distance_shore[hour >= 22 | hour < 4], na.rm = TRUE),
       NA_real_
     ),
-    night_displacement_10 = {
-      sorted_distances <- sort(distance_shore, na.last = NA)
+    night_displacement_12 = {
+      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | Period ==
+                                             "Dawn"]
+      sorted_distances <- sort(filter_distances, na.last = NA)    
       n <- length(sorted_distances)
       top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
-      abs(top_10_percent - night_median_10)
+      abs(top_10_percent - night_median_12)
       }
     ,
 
     # Night displacement for 15
-    night_median_15 = if_else(
-      night_count > 15,
-      median(distance_shore[hour >= 0 & hour < 5], na.rm = TRUE),
+    night_median_18 = if_else(
+      night_count > 18,
+      median(distance_shore[hour >= 22 | hour < 4], na.rm = TRUE),
       NA_real_
     ),
-    night_displacement_15 = {
-      sorted_distances <- sort(distance_shore, na.last = NA)
+    night_displacement_18 = {
+      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | Period ==
+                                             "Dawn"]
+      sorted_distances <- sort(filter_distances, na.last = NA)
       n <- length(sorted_distances)
       top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
-      abs(top_10_percent - night_median_15)
+      abs(top_10_percent - night_median_18)
       },
 
     # Additional columns (unchanged)
     Serial=first(Serial),
+    fish_id=first(fish_id),
     size = first(size),
     species = first(species),
     Before_After = first(Before_After),
@@ -1310,34 +1474,138 @@ MHW_daily_distance_df <- MHW_daily_distance_df %>%
     end_3 = first(end_3),
     reliability_level_3 = first(reliabaility.level.3)
   ) %>%
-  ungroup()
+  ungroup()%>%
+  distinct(Serial_fish_id, solar_date, .keep_all = TRUE)  # Remove duplicates explicitly
 
 
 
 
 hist(MHW_daily_distance_df$max_daily_displacement)
-hist(MHW_daily_distance_df$night_displacement_5)
-hist(MHW_daily_distance_df$night_displacement_10)
-hist(MHW_daily_distance_df$night_displacement_15)
+
+# Night displacment check
+hist(MHW_daily_distance_df$night_displacement_6)
+hist(MHW_daily_distance_df$night_displacement_12)
+hist(MHW_daily_distance_df$night_displacement_18)
+long_night_displacement_df <- MHW_daily_distance_df %>%
+  pivot_longer(cols = starts_with("night_displacement_"),
+               names_to = "displacement_type",
+               values_to = "distance")
+
+ggplot(long_night_displacement_df, aes(x = displacement_type, y = distance)) +
+  stat_summary(fun = mean, geom = "point", size = 4) +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = 0.2) +
+  labs(x = "Displacement Type", y = "Distance from Shore (m)") +
+  theme_minimal()
+
+# stage displacement check - max ang night
 hist(MHW_daily_distance_df$max_daily_displacement[MHW_daily_distance_df$Before_After=="Before"])
 hist(MHW_daily_distance_df$max_daily_displacement[MHW_daily_distance_df$Before_After=="MHW"])
 hist(MHW_daily_distance_df$max_daily_displacement[MHW_daily_distance_df$Before_After=="After"])
 
+hist(MHW_daily_distance_df$night_displacement_6[MHW_daily_distance_df$Before_After=="Before"])
+hist(MHW_daily_distance_df$night_displacement_6[MHW_daily_distance_df$Before_After=="MHW"])
+hist(MHW_daily_distance_df$night_displacement_6[MHW_daily_distance_df$Before_After=="After"])
 
 
-##max daily distance
-ggplot(MHW_daily_distance_df,aes(x=Before_After,y=max_daily_displacement))+
-  geom_boxplot()+
-  geom_point()+
-  theme_bw()
+
+MHW_daily_distance_df$Before_After <- factor(MHW_daily_distance_df$Before_After, levels = c("Before", "MHW", "After"))
+
+# Calculate the mean and CI for each serial_fish_id and Before_After
+MHW_disp_summary <- MHW_daily_distance_df %>%
+  group_by(Serial_fish_id,species, Before_After) %>%
+  summarise(
+    mean_disp_max = mean(max_daily_displacement, na.rm = TRUE),
+    sd_disp_max = sd(max_daily_displacement, na.rm = TRUE),  # Standard deviation
+    n_disp_max = sum(!is.na(max_daily_displacement)),  # Number of non-NA values
+    ci_lower_max = mean_disp_max - (1.96 * (sd_disp_max / sqrt(n_disp_max))),  # Lower CI
+    ci_upper_max = mean_disp_max + (1.96 * (sd_disp_max / sqrt(n_disp_max))),  # Upper CI
+    
+    mean_disp_night = mean(night_displacement_6, na.rm = TRUE),
+    sd_disp_night = sd(night_displacement_6, na.rm = TRUE),
+    n_disp_night = sum(!is.na(night_displacement_6)),
+    ci_lower_night = mean_disp_night - (1.96 * (sd_disp_night / sqrt(n_disp_night))),
+    ci_upper_night = mean_disp_night + (1.96 * (sd_disp_night / sqrt(n_disp_night))),
+    
+    .groups = 'drop'
+  )
 
 
-MHW_daily_distance_df <- MHW_daily_distance_df %>%
-  mutate(Before_After = factor(Before_After, levels = c("Before", "MHW", "After")))
+# Max displacment plot
+ggplot(MHW_disp_summary, aes(x = Before_After, y = mean_disp_max)) +
+  geom_boxplot(aes(fill = Before_After), alpha = 0.7, show.legend = FALSE) +
+  scale_fill_manual(values = c("Before" = "forestgreen", 
+                               "MHW" = "red", 
+                               "After" = "dodgerblue")) +
+  # Add mean points and CI
+  stat_summary(
+    fun = mean, 
+    geom = "point", 
+    shape = 18,  # Diamond shape for the mean
+    size = 4, 
+    color = "black"
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal, 
+    geom = "errorbar", 
+    width = 0.1, 
+    color = "black", 
+    linewidth = 0.8
+  ) +
+  
+  # Facet by species if needed (if species is present in MHW_disp_summary)
+  # facet_wrap(~species, scales = "free_y") +
+  
+  labs(
+    x = "Stage", 
+    y = "Mean maximum Displacment (m)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "top")
+
+# Night displacment plot
+ggplot(MHW_disp_summary, aes(x = Before_After, y = mean_disp_night)) +
+  geom_boxplot(aes(fill = Before_After), alpha = 0.7, show.legend = FALSE) +
+  scale_fill_manual(values = c("Before" = "forestgreen", 
+                               "MHW" = "red", 
+                               "After" = "dodgerblue")) +
+  # Add mean points and CI
+  stat_summary(
+    fun = mean, 
+    geom = "point", 
+    shape = 18,  # Diamond shape for the mean
+    size = 4, 
+    color = "black"
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal, 
+    geom = "errorbar", 
+    width = 0.1, 
+    color = "black", 
+    linewidth = 0.8
+  ) +
+  
+  # Facet by species if needed (if species is present in MHW_disp_summary)
+  # facet_wrap(~Serial_fish_id, scales = "free_y") +
+  
+  labs(
+    x = "Stage", 
+    y = "Mean Distance from Shore (m)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "top")
+
+# Step 2: Calculate delta between stages (e.g., MHW - Before, After - Before)
+MHW_disp_delta <- MHW_disp_summary %>%
+  pivot_wider(names_from = Before_After, values_from = mean_disp_max) %>%
+  mutate(
+    delta_MHW_Before = `MHW` - `Before`,  # MHW - Before
+    delta_After_Before = `After` - `Before`  # After - Before
+  )
 
 mean_disp_df <- MHW_daily_distance_df %>%
   group_by(Serial_fish_id, Before_After) %>%
-  summarise(mean_disp = mean(max_daily_displacement, na.rm = TRUE)) %>%
+  summarise(mean_max_disp = mean(max_daily_displacement, na.rm = TRUE),
+            mean_night_disp = mean(night_displacement_6, na.rm = TRUE)) %>%
   ungroup()
 
 before_disp_df <- mean_disp_df %>%

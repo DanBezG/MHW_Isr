@@ -334,7 +334,7 @@ ggplot(agg_data, aes(x = DecimalTimeOfDay, y = pred, color = Before_After)) +
     title = "Smooth Effects by Species and Before/After"
   ) +
   theme(legend.position = "bottom")
-  
+  # 
 }
 
 Plot_with_individuals <- function(mod,my_data)
@@ -474,7 +474,7 @@ for (sp_i in bioblitz_df) {
 ```
 
 
-# Fish thermal
+# Fish thermal niche
 ## Extract Fish temp preference from FishBase
 ```{r}
 for (species in unique(tags_metadata_parrot$species)) {
@@ -516,7 +516,8 @@ for (specie in unique(surveys_data$Species)) {
 
 
 # Data analysis
-## Compare IUI temp and TBR
+## Climate
+### Compare IUI temp and TBR
 ```{r}
 sst_IUI_10_min <- read.csv("Red Sea/Eilat climetology/IUI/SST_Eilat_IUI_10min.csv")
 TBR_data <- read.csv("Red Sea/TBR data/All TBR sensor data - All TB acoustic files.csv")
@@ -585,7 +586,8 @@ ggplot(data_list_deep)+
 
 
 
-## load data
+## Fish
+### load data
 ```{r}
 # Fish data 2016-2018
 fish_df <- readRDS("Red Sea/Renanel All data/2016 - 2018 parrotfish.rds") 
@@ -596,16 +598,18 @@ tags_metadata <- read.xlsx("Red Sea/Renanel All data/ID list fish.xlsx")
   
 #MHWs metadata according to different def and databases
 MHWs_Eilat_Fix_OISST <- read.xlsx("Red Sea/MHWs_def/MHW_OISST_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
-MHWs_Eilat_Moving_OISST <- read.xlsx("Red Sea/MHWs_def/MHW_OISST_Events_RedSea_Jacox.xlsx",sheet = "Short_MHW_Events_Fixed")
-MHWs_Eilat_Fix_IUI <- read.xlsx("Red Sea/MHWs_def/MHW_IUI_1Daymean_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
+MHWs_Eilat_detrended_OISST <- read.xlsx("Red Sea/MHWs_def/MHW_OISST_Events_RedSea_Jacox.xlsx",sheet = "Short_MHW_Events_Fixed")
 MHWs_Eilat_Fix_Amazia <- read.xlsx("Red Sea/MHWs_def/MHW_Amatzia_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
+MHWs_Eilat_detrended_Amazia <- read.xlsx("Red Sea/MHWs_def/MHW_Amazia_Events_RedSea_Jacox.xlsx",sheet = "Short_MHW_Events_Fixed")
+
+MHWs_Eilat_Fix_IUI <- read.xlsx("Red Sea/MHWs_def/MHW_IUI_1Daymean_Events_RedSea_Fix.xlsx",sheet = "Short_MHW_Events_Fixed")
 
 #### Specifically now on the OISST Fix def and divided to two datasets based on the different time periods - need to be changed!
 MHWs_fish_data <- read.csv("Red Sea/Results/MHW Daily Curves/MHW_OISST_Fixbase_Fish_data_continious.csv")
 MHWs_parrotfish_data <- read.csv("Red Sea/Results/MHW Daily Curves/MHW_OISST_Fixbase_parrotfish_data_continious.csv")
 
 ```
-## Filter full fish data to parrotfish/lionfish
+### Filter full fish data to parrotfish/lionfish
 ```{r}
 # filter parrotfish
 tags_metadata_parrot <- tags_metadata %>% filter(fish_type=="parrotfish")
@@ -623,7 +627,7 @@ write.csv(lionfish_data,"Red Sea/Renanel All data/lionfish_data.csv")
 
 
 
-## Combine and format full_data and fish_df
+### Combine and format full_data and fish_df
 ```{r}
 # Create combined dataset of the two time periods
 parrotfish_data <- parrotfish_data %>% select(dt_gmt2,fish_id,acc_tag,depth)
@@ -653,7 +657,7 @@ combined_parrotfish_df <- merge(combined_parrotfish_df,tags_metadata_parrot[,c(1
 rm(fish_df,full_data,parrotfish_data)
 ```
 
-## Organise, format and filter MHW_events df - after loading!
+### Organise, format and filter MHW_events df - after loading!
 ```{r}
 ################# Fix baseline OISST #################
 #number are equal to first and last MHW date as numeric in excel
@@ -668,28 +672,18 @@ MHWs_Eilat_Fix_OISST$end_3 <- as.Date(MHWs_Eilat_Fix_OISST$end_3,origin = "1899-
 MHWs_Eilat_Fix_OISST$Serial <- c(1:dim(MHWs_Eilat_Fix_OISST)[1])
 MHWs_Eilat_Fix_OISST <- MHWs_Eilat_Fix_OISST %>% relocate(Serial,.before = date_start)
 
-################# Moving baseline OISST ############################
-MHWs_Eilat_Moving_OISST$date_start <- as.Date(MHWs_Eilat_Moving_OISST$date_start,origin = "1899-12-30")
-MHWs_Eilat_Moving_OISST$date_end <- as.Date(MHWs_Eilat_Moving_OISST$date_end,origin = "1899-12-30")
-MHWs_Eilat_Moving_OISST$start_1.5 <- as.Date(MHWs_Eilat_Moving_OISST$start_1.5,origin = "1899-12-30")
-MHWs_Eilat_Moving_OISST$end_1.5 <- as.Date(MHWs_Eilat_Moving_OISST$end_1.5,origin = "1899-12-30")
-MHWs_Eilat_Moving_OISST$start_3 <- as.Date(MHWs_Eilat_Moving_OISST$start_3,origin = "1899-12-30")
-MHWs_Eilat_Moving_OISST$end_3 <- as.Date(MHWs_Eilat_Moving_OISST$end_3,origin = "1899-12-30")
-MHWs_Eilat_Moving_OISST$Serial <- c(1:dim(MHWs_Eilat_Moving_OISST)[1])
-MHWs_Eilat_Moving_OISST <- MHWs_Eilat_Moving_OISST %>% relocate(Serial,.before = date_start)
-MHWs_Eilat_Moving_OISST <- MHWs_Eilat_Moving_OISST[-4]
+################# detrende baseline OISST ############################
+MHWs_Eilat_detrended_OISST$date_start <- as.Date(MHWs_Eilat_detrended_OISST$date_start,origin = "1899-12-30")
+MHWs_Eilat_detrended_OISST$date_end <- as.Date(MHWs_Eilat_detrended_OISST$date_end,origin = "1899-12-30")
+MHWs_Eilat_detrended_OISST$start_1.5 <- as.Date(MHWs_Eilat_detrended_OISST$start_1.5,origin = "1899-12-30")
+MHWs_Eilat_detrended_OISST$end_1.5 <- as.Date(MHWs_Eilat_detrended_OISST$end_1.5,origin = "1899-12-30")
+MHWs_Eilat_detrended_OISST$start_3 <- as.Date(MHWs_Eilat_detrended_OISST$start_3,origin = "1899-12-30")
+MHWs_Eilat_detrended_OISST$end_3 <- as.Date(MHWs_Eilat_detrended_OISST$end_3,origin = "1899-12-30")
+MHWs_Eilat_detrended_OISST$Serial <- c(1:dim(MHWs_Eilat_detrended_OISST)[1])
+MHWs_Eilat_detrended_OISST <- MHWs_Eilat_detrended_OISST %>% relocate(Serial,.before = date_start)
+# Removes date peak
+MHWs_Eilat_detrended_OISST <- MHWs_Eilat_detrended_OISST[-4]
 
-
-################# Fix baseline IUI #################
-
-MHWs_Eilat_Fix_IUI$date_start <- as.Date(MHWs_Eilat_Fix_IUI$date_start,origin = "1899-12-30")
-MHWs_Eilat_Fix_IUI$date_end <- as.Date(MHWs_Eilat_Fix_IUI$date_end,origin = "1899-12-30")
-MHWs_Eilat_Fix_IUI$start_1.5 <- as.Date(MHWs_Eilat_Fix_IUI$start_1.5,origin = "1899-12-30")
-MHWs_Eilat_Fix_IUI$end_1.5 <- as.Date(MHWs_Eilat_Fix_IUI$end_1.5,origin = "1899-12-30")
-MHWs_Eilat_Fix_IUI$start_3 <- as.Date(MHWs_Eilat_Fix_IUI$start_3,origin = "1899-12-30")
-MHWs_Eilat_Fix_IUI$end_3 <- as.Date(MHWs_Eilat_Fix_IUI$end_3,origin = "1899-12-30")
-MHWs_Eilat_Fix_IUI$Serial <- c(1:dim(MHWs_Eilat_Fix_IUI)[1])
-MHWs_Eilat_Fix_IUI <- MHWs_Eilat_Fix_IUI %>% relocate(Serial,.before = date_start)
 
 ################# Fix baseline Amazia #################
 
@@ -702,14 +696,39 @@ MHWs_Eilat_Fix_Amazia$end_3 <- as.Date(MHWs_Eilat_Fix_Amazia$end_3,origin = "189
 MHWs_Eilat_Fix_Amazia$Serial <- c(1:dim(MHWs_Eilat_Fix_Amazia)[1])
 MHWs_Eilat_Fix_Amazia <- MHWs_Eilat_Fix_Amazia %>% relocate(Serial,.before = date_start)
 
+################# detrende baseline OISST ############################
+MHWs_Eilat_detrended_Amazia$date_start <- as.Date(MHWs_Eilat_detrended_Amazia$date_start,origin = "1899-12-30")
+MHWs_Eilat_detrended_Amazia$date_end <- as.Date(MHWs_Eilat_detrended_Amazia$date_end,origin = "1899-12-30")
+MHWs_Eilat_detrended_Amazia$start_1.5 <- as.Date(MHWs_Eilat_detrended_Amazia$start_1.5,origin = "1899-12-30")
+MHWs_Eilat_detrended_Amazia$end_1.5 <- as.Date(MHWs_Eilat_detrended_Amazia$end_1.5,origin = "1899-12-30")
+MHWs_Eilat_detrended_Amazia$start_3 <- as.Date(MHWs_Eilat_detrended_Amazia$start_3,origin = "1899-12-30")
+MHWs_Eilat_detrended_Amazia$end_3 <- as.Date(MHWs_Eilat_detrended_Amazia$end_3,origin = "1899-12-30")
+MHWs_Eilat_detrended_Amazia$Serial <- c(1:dim(MHWs_Eilat_detrended_Amazia)[1])
+MHWs_Eilat_detrended_Amazia <- MHWs_Eilat_detrended_Amazia %>% relocate(Serial,.before = date_start)
+# Removes date peak
+MHWs_Eilat_detrended_Amazia <- MHWs_Eilat_detrended_Amazia[-4]
 
+
+
+
+
+################# Fix baseline IUI #################
+
+MHWs_Eilat_Fix_IUI$date_start <- as.Date(MHWs_Eilat_Fix_IUI$date_start,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$date_end <- as.Date(MHWs_Eilat_Fix_IUI$date_end,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$start_1.5 <- as.Date(MHWs_Eilat_Fix_IUI$start_1.5,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$end_1.5 <- as.Date(MHWs_Eilat_Fix_IUI$end_1.5,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$start_3 <- as.Date(MHWs_Eilat_Fix_IUI$start_3,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$end_3 <- as.Date(MHWs_Eilat_Fix_IUI$end_3,origin = "1899-12-30")
+MHWs_Eilat_Fix_IUI$Serial <- c(1:dim(MHWs_Eilat_Fix_IUI)[1])
+MHWs_Eilat_Fix_IUI <- MHWs_Eilat_Fix_IUI %>% relocate(Serial,.before = date_start)
 ```
 
 
-## Calculate Each MHW summary - Need to choose dataset and change file names first!!
+### Calculate Each MHW summary - Need to choose dataset and change file names first!!
 ```{r}
 ####### Choose which dataset to work on through MHWs_Eilat ###########
-MHWs_Eilat <- MHWs_Eilat_Moving_OISST  # Set the dataset to work with
+MHWs_Eilat <- MHWs_Eilat_Fix_OISST  # Set the dataset to work with
 
 #prepare the fish-MHWs summary dataframe 
 sum_heat_wave <- data.frame(fish_id=numeric(),
@@ -825,7 +844,7 @@ sum_heat_wave <- distinct(merge(sum_heat_wave,stat_tags_metadata_parrot,by = "fi
 
 ############ Save the summary data 
 ############ Choose the name of the basedataset and def #############
-write.csv(sum_heat_wave,paste("Red Sea/Results/Individual Heatwaves/Fish_heatwave_data_Amazia_Fixbase_MHW_Stage_Avg",Sys.Date(),".csv"))
+write.csv(sum_heat_wave,paste("Red Sea/Results/Individual Heatwaves/Fish_heatwave_data_Amazia_detrended_MHW_Stage_Avg",Sys.Date(),".csv"))
 
 # Nest the data by Serial and window_factor
 nest_hw <- sum_heat_wave %>% 
@@ -833,14 +852,14 @@ nest_hw <- sum_heat_wave %>%
   nest_by(Serial,window_factor)
 
 # Save the nested data
-saveRDS(nest_hw,paste("Red Sea/Results/Individual Heatwaves/Nested_heatwaves_Amazia_Fixbase_MHW_Stage_Avg",Sys.Date(),".RDS"))
+saveRDS(nest_hw,paste("Red Sea/Results/Individual Heatwaves/Nested_heatwaves_Amazia_detrended_MHW_Stage_Avg",Sys.Date(),".RDS"))
 ```
 
 
-## Calculate means before and after the heat wave - long : Continue to the MHW Summary section
+### Calculate means before and after the heat wave - long : Continue to the MHW Summary section
 ```{r}
 # Initialize an empty dataframe to store the results
-MHWs_stat <- data.frame(
+MHWs_comparison <- data.frame(
   fish_id=numeric(), # ID of the fish
   Serial = numeric(),              # Serial number for the heatwave event
   window_factor = numeric(),       # Factor indicating the analysis window size
@@ -918,65 +937,128 @@ for (event_calc in 1:dim(nest_hw)[1]) {
                     temp_row$Stage_period[row_i] <- "After : Before"
                   }
       # Append the temporary row to the main results dataframe
-      MHWs_stat <- rbind(MHWs_stat,temp_row)
+      MHWs_comparison <- rbind(MHWs_comparison,temp_row)
     }
   }
 }
 
 # Remove rows where all metrics (activity, depth, distance) are NA
-MHWs_stat <- MHWs_stat %>% filter(!(is.na(ln_activity_ratio) & is.na(delta_depth)))
+MHWs_comparison <- MHWs_comparison %>% filter(!(is.na(ln_activity_ratio) & is.na(delta_depth)))
 
 # Merge with heatwave metadata
 ############ Choose the name of the basedataset and def #############
-MHWs_stat <- merge(MHWs_stat,MHWs_Eilat,by = "Serial") %>%  select(-Fish_IDs)
+MHWs_comparison <- merge(MHWs_comparison,MHWs_Eilat,by = "Serial") %>%  select(-Fish_IDs)
 
 # Add species information from the metadata
 stat_tags_metadata_parrot <- tags_metadata_parrot %>% 
   select(fish_id,species) 
-MHWs_stat <- distinct(merge(MHWs_stat,stat_tags_metadata_parrot,by = "fish_id"))
+MHWs_comparison <- distinct(merge(MHWs_comparison,stat_tags_metadata_parrot,by = "fish_id"))
 
 # Save the final results to CSV 
 ############ Choose the name of the basedataset and def #############
-write.csv(MHWs_stat,paste("Red Sea/Results/Individual Heatwaves/MHWs_Stat_Amazia_Fixbase_MHW_Stage_Avg_long",Sys.Date(),".csv"))
+write.csv(MHWs_comparison,paste("Red Sea/Results/Individual Heatwaves/MHWs_comparison_Amazia_detrended",Sys.Date(),".csv"))
 ```
 
 
 
-## MHW stats graphs and lm
+### Definiton summary
+```{r}
+MHW_count <- length(unique(sum_heat_wave$Serial))
+
+MHW_fish_count <- length(unique(sum_heat_wave$fish_id))
+
+min_fish <- sum_heat_wave %>%
+  group_by(Serial) %>%
+  summarise(n_fish = n_distinct(fish_id)) %>%
+  summarise(min_fish = min(n_fish)) %>%
+  pull(min_fish)
+
+max_fish <- sum_heat_wave %>%
+  group_by(Serial) %>%
+  summarise(n_fish = n_distinct(fish_id)) %>%
+  summarise(max_fish = max(n_fish)) %>%
+  pull(max_fish)
+
+mhw_depths <- sum_heat_wave %>%
+  filter(!is.na(mean_depth))
+mhws_with_depth <-  mhw_depths %>% 
+  distinct(Serial)
+fish_with_depth <- mhw_depths %>% 
+  distinct(fish_id)
+fish_with_depth_per_stage <- mhw_depths %>% 
+  group_by(Before_After) %>%
+  summarise(n_fish_with_depth = n_distinct(fish_id)) %>%
+  arrange(Before_After)
+
+mhw_activity <- sum_heat_wave %>%
+  filter(!is.na(mean_activity))
+mhws_with_activity <-mhw_activity  %>%
+  distinct(Serial)
+fish_with_activity <- mhw_activity %>% 
+  distinct(fish_id)
+fish_with_activity_per_stage <- mhw_activity %>% 
+  group_by(Before_After) %>%
+  summarise(n_fish_with_activity = n_distinct(fish_id)) %>%
+  arrange(Before_After)
+
+cat("----- MHW and Fish Data Summary -----\n\n")
+
+cat("Total number of MHW events (Serial):", MHW_count, "\n")
+cat("Total number of unique fish tagged during MHW study:", MHW_fish_count, "\n\n")
+cat("Minimum number of fish per MHW event:", min_fish, "\n")
+cat("Maximum number of fish per MHW event:", max_fish, "\n")
+
+cat("Number of MHW events with activity data:", nrow(mhws_with_activity), "\n")
+cat("Number of fish with activity data:", nrow(fish_with_activity), "\n\n")
+
+cat("Fish with activity data per MHW stage:\n")
+print(fish_with_activity_per_stage)
+
+cat("Number of MHW events with depth data:", nrow(mhws_with_depth), "\n")
+cat("Number of fish with depth data:", nrow(fish_with_depth), "\n\n")
+
+cat("Fish with depth data per MHW stage:\n")
+print(fish_with_depth_per_stage)
+cat("\n")
+cat("\n--------------------------------------\n")
+
+```
+
+### MHW stats graphs and lm
 ```{r}
 
 ## Activity 
 
 # Only MHW:Before
-MHWs_stat_lm <- MHWs_stat %>% filter(window_factor==1.5 & Stage_period=="After : MHW" )
+MHWs_comparison_lm <- MHWs_comparison %>% filter(window_factor==1.5 & Stage_period=="MHW : Before" )
 
 ## Several stage period
-# MHWs_stat_lm <- MHWs_stat %>% filter(window_factor==1.5 & (Stage_period=="MHW : Before" | Stage_period=="After : MHW"))
+# MHWs_comparison_lm <- MHWs_comparison %>% filter(window_factor==1.5 & (Stage_period=="MHW : Before" | Stage_period=="After : MHW"))
 
 # Make sure factor levels are in correct order
 sum_heat_wave$Before_After <- factor(sum_heat_wave$Before_After,
                                  levels = c("Before", "MHW", "After"))
 
-hist(MHWs_stat_lm$ln_activity_ratio)
-lm_act<- lm(ln_activity_ratio ~ intensity_cumulative,data = MHWs_stat_lm)
+hist(MHWs_comparison_lm$ln_activity_ratio)
+lm_act<- lm(ln_activity_ratio ~ intensity_cumulative,data = MHWs_comparison_lm)
 gratia::appraise(lm_act)
 summary(lm_act)
 
 # Make sure factor levels are in correct order
-MHWs_stat_lm$Stage_period <- factor(MHWs_stat_lm$Stage_period,
+MHWs_comparison_lm$Stage_period <- factor(MHWs_comparison_lm$Stage_period,
                                  levels = c("MHW : Before", "After : Before", "After : MHW"))
 
 
 # Step 1: Summarize n per group
 # Summary stats for label positioning
-n_df_act <- MHWs_stat_lm %>%
+n_df_act <- MHWs_comparison_lm %>%
   group_by(intensity_cumulative) %>%
   filter(!is.na(ln_activity_ratio)) %>% 
   summarise(n = n(),
             mean_ln = mean(ln_activity_ratio, na.rm = TRUE),
             .groups = "drop") 
 
-act_reg_plot <- ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = ln_activity_ratio)) +
+act_reg_plot <- ggplot(MHWs_comparison_lm, aes(x = intensity_cumulative, y = ln_activity_ratio)) +
   stat_summary(fun = mean, geom = "point", size = 2, color = "black") +
   stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = 0.2, color = "black") +
   geom_smooth(method = "lm", se = TRUE, color = "darkred", linewidth = 1) +
@@ -1015,8 +1097,7 @@ act_symbol_compare_plot <- ggplot(sum_heat_wave_act, aes(x = Before_After, y = m
                                 "Day" = 8,
                                 "Dusk" = 0,
                                 "Night" = 3)) +
-  geom_jitter(aes(shape = Period),position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),size=2.5)+
-    # geom_jitter(aes(shape = Period),size=2.5)+
+  # geom_jitter(aes(shape = Period),position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),size=2.5)+
   # facet_wrap(~species,scales="free_y")+
   
   # Add mean points and CI
@@ -1040,57 +1121,26 @@ act_symbol_compare_plot <- ggplot(sum_heat_wave_act, aes(x = Before_After, y = m
   ) +
   theme_bw() +
   theme(legend.position = "top")
-ggsave("Red Sea/Results/Plots/act_symb_compare_plot_Amazia_Fix.svg", act_symbol_compare_plot, width = 12, height = 10)
-
-
-# Plot - color instead of shapes
-color_compare_plot <- ggplot(sum_heat_wave_act, aes(x = Before_After, y = mean_activity)) +
-  geom_boxplot(show.legend = FALSE) +
-  scale_color_manual(values = c("Dawn" = "#DAA520",
-                              "Day" = "#4682B4",
-                              "Dusk" = "#BA55D3",
-                              "Night" = "#708090")) +
-  geom_jitter(aes(color = Period),size=2,shape=17)+
-  
-  # Add mean points and CI
-  stat_summary(
-    fun = mean,
-    geom = "point",
-    shape = 18, # Diamond shape
-    size = 6,
-    color = "black"
-  ) +
-  stat_summary(
-    fun.data = mean_cl_normal,
-    geom = "errorbar",
-    width = 0.1,
-    color = "black",
-    linewidth = 0.8
-  ) +
-  labs(
-    x = "Stage",
-    y = "Mean Activity"
-  ) +
-  theme_bw() 
+ggsave("Red Sea/Results/Plots/act_symb_compare_plot_species_OISST_Fix.svg", act_symbol_compare_plot, width = 12, height = 10)
 
 act_com_plot <- act_symbol_compare_plot+act_reg_plot + plot_layout(widths = c(2,4))
 
 ## Depth
 
-lm_dep<- lm(delta_depth ~ intensity_cumulative,data = MHWs_stat_lm)
+lm_dep<- lm(delta_depth ~ intensity_cumulative,data = MHWs_comparison_lm)
 gratia::appraise(lm_dep)
 summary(lm_dep)
 
 # Step 1: Summarize n per group
 # Summary stats for label positioning
-n_df_dep <- MHWs_stat_lm %>%
+n_df_dep <- MHWs_comparison_lm %>%
   group_by(intensity_cumulative) %>%
   filter(!is.na(delta_depth)) %>% 
   summarise(n = n(),
             mean_ln = mean(delta_depth, na.rm = TRUE),
             .groups = "drop") 
 
-dep_reg_plot <- ggplot(MHWs_stat_lm, aes(x = intensity_cumulative, y = delta_depth)) +
+dep_reg_plot <- ggplot(MHWs_comparison_lm, aes(x = intensity_cumulative, y = delta_depth)) +
   stat_summary(fun = mean, geom = "point", size = 2, color = "black") +
   stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = 0.2, color = "black") +
   geom_smooth(method = "lm", se = TRUE, color = "darkred", linewidth = 1) +
@@ -1127,7 +1177,9 @@ dep_symbol_compare_plot <- ggplot(sum_heat_wave_dep, aes(x = Before_After, y = m
                                 "Dusk" = 0,
                                 "Night" = 3)) +
   # facet_wrap(~species,scales="free_y")+
-  geom_jitter(aes(shape = Period),position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),size=2.5)+
+  # geom_jitter(aes(shape = Period),position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),size=2.5)+
+  scale_y_reverse()+
+  coord_cartesian(ylim = c(max(sum_heat_wave_dep$mean_depth, na.rm = TRUE), 0)) +  # Clip at 0
   
   # Add mean points and CI
   stat_summary(
@@ -1150,19 +1202,19 @@ dep_symbol_compare_plot <- ggplot(sum_heat_wave_dep, aes(x = Before_After, y = m
   ) +
   theme_bw() +
   theme(legend.position = "top")
-ggsave("Red Sea/Results/Plots/dep_symb_compare_plot_Amazia_Fix.svg", dep_symbol_compare_plot, width = 12, height = 10)
+ggsave("Red Sea/Results/Plots/dep_symb_compare_plot_OISST_Fix.svg", dep_symbol_compare_plot, width = 12, height = 10)
 
 dep_com_plot <- dep_symbol_compare_plot+dep_reg_plot + plot_layout(widths = c(2,4))
-ggs
+
 full_plot <- act_com_plot / dep_com_plot
 
-ggsave("Red Sea/Results/Plots/act_dep_compare_plot_OISST_Fix.svg", full_plot, width = 12, height = 10)
+ggsave("Red Sea/Results/Plots/act_dep_compare_plot_Amazia_Fix.svg", full_plot, width = 12, height = 10)
 
 ```
 
 
-## GAM
-### Data exploration
+### GAM
+#### Data exploration
 ```{r}
 ### depth/activity/distance ~ time of day + Before.After + intensity mean/cummelative + random(fish_id) +random (MHW_ID)
 
@@ -1241,7 +1293,7 @@ col_num_vis <- MHWs_combined_data %>% select(activity,depth,distance_shore,inten
 pairs(col_num_vis,cex.labels = 1)
 
 ```
-### Find the three top MHWs and isolated MHWs
+#### Find the three top MHWs and isolated MHWs
 ```{r}
 names(MHWs_Eilat) <- make.names(names(MHWs_Eilat), unique = TRUE)
 
@@ -1282,7 +1334,7 @@ saveRDS(top_MHWs,"Red Sea/Results/Models/top_MHWs_OISST_Fix.rds")
 ```
 
 
-### Create dataframe for GAM and daily curves - Need to choose dataset and change file names first!!
+#### Create dataframe for GAM and daily curves - Need to choose dataset and change file names first!!
 ```{r}
 ####### choose which dataset to work on through MHWs_Eilat  ###########
 MHWs_Eilat <- MHWs_Eilat_Fix_Amazia
@@ -1357,7 +1409,7 @@ MHWs_fish_data$Before_After <- relevel(MHWs_fish_data$Before_After,ref="Before")
   
 ```
 
-### Disatnce statistical tests
+#### Disatnce statistical tests
 ```{r}
 MHW_daily_distance_df <- MHWs_fish_data 
 MHW_daily_distance_df <- MHW_daily_distance_df %>%
@@ -1640,7 +1692,7 @@ ggplot(summary_log_ratios_distances, aes(x = Before_After, y = mean_log_ratio)) 
 ```
 
 
-### Depth Models 
+#### Depth Models 
 ```{r}
 hist(MHWs_fish_data$depth)
 # Log-transform depth to address skewness in distribution
@@ -1837,7 +1889,7 @@ if ("species" %in% all.vars(formula(model))) {
 saveRDS(results_depths,"Red Sea/Results/Models/Depth_Models_Amazia_Fixbase.RDS")
 
 ```
-### Activity models
+#### Activity models
 ```{r}
 
 hist(MHWs_fish_data$activity) # Check activity distribution 
@@ -1999,7 +2051,7 @@ saveRDS(results_activity,"Red Sea/Results/Models/Act_Models_OISST_detrended_Jaco
 
 ```
 
-### Distance models
+#### Distance models
 ```{r}
 
 # Filter unique Serial_fish_id with non-NA distance data
@@ -2126,6 +2178,7 @@ saveRDS(act_models,"Red Sea/Results/Act_Models.RDS")
 
 
 ```
+
 
 # Not sure if necessary
 ### Models
@@ -2271,7 +2324,7 @@ ggplot(new_data, aes(x = DecimalTimeOfDay, y = predicted_depth, colour = Before_
 ```
 ## Calculate means before and after the heat wave - wide
 ```{r}
-MHWs_stat <- data.frame(
+MHWs_comparison <- data.frame(
   fish_id=numeric(),
   Serial=numeric(),
   window_factor=numeric(),
@@ -2340,16 +2393,16 @@ for (event_calc in 1:dim(nest_hw)[1]) {
                     temp_row$delta_distance_bef_aft <-
                     abs(temp_period$distance_shore_mean[temp_period$Before_After=="After"] - temp_period$distance_shore_mean[temp_period$Before_After=="Before"])
                   }
-      MHWs_stat <- rbind(MHWs_stat,temp_row)
+      MHWs_comparison <- rbind(MHWs_comparison,temp_row)
     }
   }
 }
-MHWs_stat <- merge(MHWs_stat,MHWs_Eilat_Fix_OISST,by = "Serial")
-MHWs_stat <- MHWs_stat %>% select(-Fish_IDs)#remove fish id
+MHWs_comparison <- merge(MHWs_comparison,MHWs_Eilat_Fix_OISST,by = "Serial")
+MHWs_comparison <- MHWs_comparison %>% select(-Fish_IDs)#remove fish id
 stat_tags_metadata_parrot <- tags_metadata_parrot %>% 
   select(fish_id,species) 
-MHWs_stat <- distinct(merge(MHWs_stat,stat_tags_metadata_parrot,by = "fish_id"))
-write.csv(MHWs_stat,paste("Red Sea/Results/Individual Heatwaves/Eilat_MHWs_Stat_IUI__Fixbase_MHW_Stage_Avg_wide",Sys.Date(),".csv"))
+MHWs_comparison <- distinct(merge(MHWs_comparison,stat_tags_metadata_parrot,by = "fish_id"))
+write.csv(MHWs_comparison,paste("Red Sea/Results/Individual Heatwaves/Eilat_MHWs_comparison_IUI__Fixbase_MHW_Stage_Avg_wide",Sys.Date(),".csv"))
 ```
 ## Graphs
 ```{r}

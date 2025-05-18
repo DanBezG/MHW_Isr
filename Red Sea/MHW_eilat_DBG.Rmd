@@ -382,41 +382,18 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
     #using the right database
     filter_fish <- Filter_Fish(fish_ids,combined_parrotfish_df)  
     ####### takes the longer timespan, 3 times before and after the MHW #####
-    MHW_Data <- filter_fish %>% filter(date>= MHWs_Eilat$start_1.5[event] & date<= 
-                                              MHWs_Eilat$end_1.5[event])
+    MHW_Data <- filter_fish %>% filter(date>= MHWs_Eilat$start_1.5[event] & date<= MHWs_Eilat$end_1.5[event])
     MHW_Data <- Before_After_MHW(MHW_Data,MHWs_Eilat$date_start[event], MHWs_Eilat$date_end[event])
     
-    #remove colums of fish ids
+    #remove column of fish ids
     names(MHWs_Eilat) <- make.names(names(MHWs_Eilat), unique = TRUE)
     temp_MHWs_Eilat <- MHWs_Eilat %>% select(-Fish_IDs)
     MHW_Data <- MHW_Data %>% arrange(fish_id,real_datetime)
     MHW_Data$Serial <- MHWs_Eilat$Serial[event]
     MHW_Data <- merge(MHW_Data,temp_MHWs_Eilat,by="Serial")
-    
-    #standerized procedure
-     # for (fish in unique(MHW_Data$fish_id)) {
-     #     avg_act <- mean(MHW_Data$activity[MHW_Data$fish_id==fish],na.rm = T)
-     #     avg_dep <- mean(MHW_Data$depth[MHW_Data$fish_id==fish],na.rm = T)
-     #     avg_dis <- mean(MHW_Data$distance_shore[MHW_Data$fish_id==fish],na.rm = T)
-     #     
-     #     MHW_Data$activity_std[MHW_Data$fish_id==fish] <- MHW_Data$activity[MHW_Data$fish_id==fish]- avg_act
-     #     MHW_Data$activity_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$activity[MHW_Data$fish_id==fish]- avg_act)/sd(MHW_Data$activity[MHW_Data$fish_id==fish],na.rm = T)
-     #     MHW_Data$depth_std[MHW_Data$fish_id==fish] <- MHW_Data$depth[MHW_Data$fish_id==fish]- avg_dep
-     #     MHW_Data$depth_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$depth[MHW_Data$fish_id==fish]- avg_dep)/sd(MHW_Data$depth[MHW_Data$fish_id==fish],na.rm = T)
-     #     MHW_Data$distance_std[MHW_Data$fish_id==fish] <- MHW_Data$distance_shore[MHW_Data$fish_id==fish]- avg_dis
-     #     MHW_Data$distance_std_sd[MHW_Data$fish_id==fish] <- (MHW_Data$distance_shore[MHW_Data$fish_id==fish]- avg_dis)/sd(MHW_Data$distance_shore[MHW_Data$fish_id==fish],na.rm = T)
-     # }
-     # 
-   
     MHWs_fish_data <- rbind(MHWs_fish_data,MHW_Data)  
   }
 }
-
-# # Create Standerize distance shore
-# MHWs_fish_data <- MHWs_fish_data %>% 
-#   group_by(fish_id) %>% 
-#   mutate(centered_distance = distance_shore-mean(distance_shore),
-#          standerized_distance=centered_distance/sd(distance_shore))
 
 # Create a column with the time of the day
 MHWs_fish_data$TimeOfDay <- as.POSIXct(format(MHWs_fish_data$real_datetime,format = "%H:%M:%S"),format = "%H:%M:%S")
@@ -427,9 +404,6 @@ MHWs_fish_data$DecimalTimeOfDay <- time_to_decimal(MHWs_fish_data$TimeOfDay)
 # Convert species column to factor
 MHWs_fish_data$species <-as.factor(MHWs_fish_data$species) 
 
-# Convert Before_after to factor and create new factor for combined MHW serial and fish id
-MHWs_fish_data$Serial_fish_id <- paste(MHWs_fish_data$Serial,MHWs_fish_data$fish_id,sep="_")
-MHWs_fish_data$Serial_fish_id <- as.factor(MHWs_fish_data$Serial_fish_id)
 MHWs_fish_data$Before_After <- as.factor(MHWs_fish_data$Before_After)
 
 # Ensure date columns are in POSIXct format
@@ -439,6 +413,115 @@ MHWs_Eilat$date_end <- as.POSIXct(MHWs_Eilat$date_end)
 MHWs_fish_data$Before_After <- factor(MHWs_fish_data$Before_After,levels = c("Before", "MHW", "After"))
 MHWs_fish_data$Before_After <- relevel(MHWs_fish_data$Before_After,ref="Before")
 return(MHWs_fish_data)
+}
+
+get_distance_metrics <- function(MHW_def) {
+  MHW_daily_distance_df <- get_MHW_fish_df(MHWs_Eilat) 
+MHW_daily_distance_df <- MHW_daily_distance_df %>%
+  mutate(hour = hour(real_datetime)) %>%     # Extract hour
+  Add_Day_Period(.) %>% 
+  arrange(fish_id,real_datetime) %>%
+  mutate(solar_date = case_when(
+      Period == "Night" & hour < 12 ~ date - 1,  # Early Night (after midnight) → subtract 1 day
+      TRUE ~ date  # Otherwise keep the same
+    )) %>% 
+  relocate(hour,Period,solar_date,.after = date) %>% 
+  ungroup()
+  MHW_daily_distance_df <- MHW_daily_distance_df %>%
+  group_by(Serial,fish_id, solar_date) %>%
+  filter(!is.na(distance_shore)) %>%
+  summarise(
+    n = n(),
+    # Max daily displacement: median of the top 10% - median of the bottom 10%
+    max_daily_displacement = {
+      sorted_distances <- sort(distance_shore, na.last = NA)
+      n <- length(sorted_distances)
+      ifelse(n>50,
+             {
+              top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
+              bottom_10_percent <- sorted_distances[1:floor(0.1 * n)]
+              abs(median(top_10_percent, na.rm = TRUE) - 
+                    median(bottom_10_percent,na.rm = TRUE))         
+              }
+      ,NA)
+      
+    },
+
+    # Night counts (hour between 22:00 and 4:00)
+    night_count = sum(hour >= 22 | hour < 4),
+
+    # Night displacement for 5
+    night_median_6 = if_else(
+      night_count > 6,
+      median(distance_shore[hour >= 22 | hour < 4], na.rm = TRUE),
+      NA_real_
+    ),
+    night_displacement_6 =
+      {
+      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | 
+                                           Period =="Dawn"]
+      sorted_distances <- sort(filter_distances, na.last = NA)
+      n <- length(sorted_distances)
+      top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
+      abs(top_10_percent - night_median_6)
+      },
+    # Additional columns (unchanged)
+    Serial=first(Serial),
+    fish_id=first(fish_id),
+    size = first(size),
+    species = first(species),
+    Before_After = first(Before_After),
+    date_start = first(date_start),
+    date_peak = first(date_peak),
+    date_end = first(date_end),
+    duration = first(duration),
+    intensity_mean = first(intensity_mean),
+    intensity_max = first(intensity_max),
+    intensity_var = first(intensity_var),
+    intensity_cumulative = first(intensity_cumulative),
+    intensity_mean_relThresh = first(intensity_mean_relThresh),
+    intensity_max_relThresh = first(intensity_max_relThresh),
+    intensity_var_relThresh = first(intensity_var_relThresh),
+    intensity_mean_abs = first(intensity_mean_abs),
+    intensity_max_abs = first(intensity_max_abs),
+    intensity_var_abs = first(intensity_var_abs),
+    rate_onset = first(rate_onset),
+    rate_decline = first(rate_decline),
+    # Category = first(Category),
+    start_1.5 = first(start_1.5),
+    reliability_level = first(reliabaility.level),
+    end_1.5 = first(end_1.5),
+    reliability_level_1 = first(reliabaility.level.1),
+    start_3 = first(start_3),
+    reliability_level_2 = first(reliabaility.level.2),
+    end_3 = first(end_3),
+    reliability_level_3 = first(reliabaility.level.3)
+  ) %>%
+  ungroup()%>%
+  distinct(Serial,fish_id, solar_date, .keep_all = TRUE)  # Remove duplicates explicitly)
+  # Calculate the mean for each serial_fish_id and Before_After
+MHW_disp_summary <- MHW_daily_distance_df %>%
+  group_by(Serial,fish_id,Before_After) %>%
+  summarise(
+    mean_disp_max = mean(max_daily_displacement, na.rm = TRUE),
+    sd_disp_max = sd(max_daily_displacement, na.rm = TRUE),  # Standard deviation
+    disp_max_days = sum(!is.na(max_daily_displacement)),  # Number of non-NA values
+    mean_disp_night = mean(night_displacement_6, na.rm = TRUE),
+    sd_disp_night = sd(night_displacement_6, na.rm = TRUE),
+    disp_night_days = sum(!is.na(night_displacement_6)),
+    .groups = 'drop')
+
+MHW_disp_comparison <- MHW_disp_summary %>%
+  select(Serial,fish_id,Before_After,mean_disp_max) %>% 
+  pivot_wider(names_from = Before_After, values_from = mean_disp_max) %>%
+  mutate(
+    delta_MHW_Before = abs(`MHW` - `Before`),  # MHW - Before
+    delta_After_Before = abs(`After` - `Before`),  # After - Before
+    log_MHW_Before = ifelse(is.finite(log(`MHW` / `Before`)), log(`MHW` / `Before`), NA_real_),
+    log_After_Before = ifelse(is.finite(log(`After` / `Before`)), log(`After` / `Before`), NA_real_)
+    )
+    return(list(sum_disp = MHW_disp_summary,comparison_disp = 
+                  MHW_disp_comparison))
 }
 
 ```
@@ -816,11 +899,6 @@ sum_heat_wave <- data.frame(fish_id=numeric(),
                             sd_depth=numeric(),
                             dep_detections=numeric(),
                             Conf_int_depth=numeric(),
-                            distance_shore_mean=numeric(),
-                            distance_shore_median=numeric(),
-                            distance_shore_sd=numeric(),
-                            distance_shore_sum=numeric(),
-                            Conf_int_distance_shore=numeric(),
                             Serial=numeric(),
                             window_factor=numeric()
                             )
@@ -885,19 +963,9 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
         temp_sum_heat_wave_dep <- temp_sum_heat_wave_dep[temp_sum_heat_wave_dep$dep_detections>50,]
 
 
-      # Calculate summary statistics for distance to shore
-      temp_sum_heat_wave_dis <- Windowed_MHW %>%
-        filter(hour_bin_code %in% bins_count_dis$hour_bin_code) %>%
-        group_by(fish_id,Before_After,Period) %>%
-        summarise_at(vars(standerized_distance),funs(mean(.,na.rm=T),
-                                           median(.,na.rm=T),
-                                           sd(.,na.rm=T),sum(!is.na(.)))) %>%
-        mutate(Conf_int_distance_shore=sd/sqrt(sum) * qt(p=0.975,df=sum-1))
-      colnames(temp_sum_heat_wave_dis)[4:7] <- paste("distance_shore",colnames(temp_sum_heat_wave_dis)[4:7],sep = "_")
 
      # Merge summary statistics for all metrics
-      temp_sum_heat_wave <- conditional_merge(temp_sum_heat_wave_dis,temp_sum_heat_wave_dep,c("fish_id","Before_After","Period"))
-      temp_sum_heat_wave <- conditional_merge(temp_sum_heat_wave,temp_sum_heat_wave_act,c("fish_id","Before_After","Period"))
+      temp_sum_heat_wave <- conditional_merge(temp_sum_heat_wave_dep,temp_sum_heat_wave_act,c("fish_id","Before_After","Period"))
       temp_sum_heat_wave$Serial <- MHWs_Eilat$Serial[event]
       temp_sum_heat_wave$window_factor <- ifelse(window_size == 20, 1.5,3)
       temp_sum_heat_wave <- Fill_In_temp_sum_heat_wave(colnames(sum_heat_wave),temp_sum_heat_wave)
@@ -908,7 +976,10 @@ for (event in 1:dim(MHWs_Eilat)[1]) {
     }   
   }
 }
-
+temp_sum_heat_wave_disp <- get_distance_metrics(MHWs_Eilat)
+sum_heat_wave <- merge(sum_heat_wave,
+           temp_sum_heat_wave_disp$sum_disp,
+           by = c("Serial","fish_id","Before_After"))
 # Reorganize columns in the summary dataframe
 sum_heat_wave <- sum_heat_wave %>% relocate(Serial,.before = fish_id)
 sum_heat_wave <- sum_heat_wave %>% relocate(window_factor,.before = fish_id)
@@ -1021,6 +1092,24 @@ for (event_calc in 1:dim(nest_hw)[1]) {
 # Remove rows where all metrics (activity, depth, distance) are NA
 MHWs_comparison <- MHWs_comparison %>% filter(!(is.na(ln_activity_ratio) & is.na(delta_depth)))
 
+long_disp_comparison <- temp_sum_heat_wave_disp$comparison_disp %>%
+  select(Serial, fish_id, starts_with("delta_"), starts_with("log_")) %>%
+  pivot_longer(
+    cols = -c(Serial, fish_id),
+    names_to = c(".value", "Stage_period"),
+    names_pattern = "(delta|log)_(.*)"
+  ) %>%
+  mutate(
+    Stage_period = recode(Stage_period,
+                          "MHW_Before" = "MHW : Before",
+                          "After_Before" = "After : Before")
+  )%>%
+  rename(
+    `delta_max_displacement` = delta,
+    `log_max_displacement` = log
+  )
+MHWs_comparison <- merge(MHWs_comparison,long_disp_comparison,by=c("Serial","fish_id","Stage_period"))
+
 # Merge with heatwave metadata
 ############ Choose the name of the basedataset and def #############
 MHWs_comparison <- merge(MHWs_comparison,MHWs_Eilat,by = "Serial") %>%  select(-Fish_IDs)
@@ -1037,7 +1126,7 @@ write.csv(MHWs_comparison,paste("Red Sea/Results/Individual Heatwaves/MHWs_compa
 
 
 
-#### Disatnce statistical tests
+#### Disatnce statistical tests - including sensitivity test
 ```{r}
 MHW_daily_distance_df <- get_MHW_fish_df(MHWs_Eilat) 
 MHW_daily_distance_df <- MHW_daily_distance_df %>%
@@ -1052,7 +1141,7 @@ MHW_daily_distance_df <- MHW_daily_distance_df %>%
   ungroup()
 
 MHW_daily_distance_df <- MHW_daily_distance_df %>%
-  group_by(Serial_fish_id, solar_date) %>%
+  group_by(Serial,fish_id,Serial_fish_id, solar_date) %>%
   filter(!is.na(distance_shore)) %>%
   summarise(
     n = n(),
@@ -1064,8 +1153,8 @@ MHW_daily_distance_df <- MHW_daily_distance_df %>%
              {
               top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
               bottom_10_percent <- sorted_distances[1:floor(0.1 * n)]
-              abs(median(top_10_percent, na.rm = TRUE) - median(bottom_10_percent,
-                                                                na.rm = TRUE))         
+              abs(median(top_10_percent, na.rm = TRUE) - 
+                    median(bottom_10_percent, na.rm = TRUE))         
               }
       ,NA)
       
@@ -1082,7 +1171,8 @@ MHW_daily_distance_df <- MHW_daily_distance_df %>%
     ),
     night_displacement_6 =
       {
-      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | Period =="Dawn"]
+      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | 
+                                           Period =="Dawn"]
       sorted_distances <- sort(filter_distances, na.last = NA)
       n <- length(sorted_distances)
       top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
@@ -1094,10 +1184,10 @@ MHW_daily_distance_df <- MHW_daily_distance_df %>%
     night_median_12 = if_else(
       night_count > 12,
       median(distance_shore[hour >= 22 | hour < 4], na.rm = TRUE),
-      NA_real_
-    ),
+      NA_real_),
     night_displacement_12 = {
-      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | Period == "Dawn"]
+      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | 
+                                           Period == "Dawn"]
       sorted_distances <- sort(filter_distances, na.last = NA)    
       n <- length(sorted_distances)
       top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
@@ -1109,10 +1199,10 @@ MHW_daily_distance_df <- MHW_daily_distance_df %>%
     night_median_18 = if_else(
       night_count > 18,
       median(distance_shore[hour >= 22 | hour < 4], na.rm = TRUE),
-      NA_real_
-    ),
+      NA_real_),
     night_displacement_18 = {
-      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | Period == "Dawn"]
+      filter_distances <- distance_shore[Period == "Day" | Period == "Dusk" | 
+                                           Period == "Dawn"]
       sorted_distances <- sort(filter_distances, na.last = NA)
       n <- length(sorted_distances)
       top_10_percent <- sorted_distances[ceiling(0.9 * n):n]
@@ -1152,7 +1242,7 @@ MHW_daily_distance_df <- MHW_daily_distance_df %>%
     reliability_level_3 = first(reliabaility.level.3)
   ) %>%
   ungroup()%>%
-  distinct(Serial_fish_id, solar_date, .keep_all = TRUE)  # Remove duplicates explicitly
+  distinct(Serial,fish_id,Serial_fish_id, solar_date, .keep_all = TRUE)  # Remove duplicates explicitly
 
 
 
@@ -1186,7 +1276,7 @@ hist(MHW_daily_distance_df$night_displacement_6[MHW_daily_distance_df$Before_Aft
 
 # Calculate the mean and CI for each serial_fish_id and Before_After
 MHW_disp_summary <- MHW_daily_distance_df %>%
-  group_by(Serial_fish_id,Before_After) %>%
+  group_by(Serial,fish_id,Serial_fish_id,Before_After) %>%
   summarise(
     mean_disp_max = mean(max_daily_displacement, na.rm = TRUE),
     sd_disp_max = sd(max_daily_displacement, na.rm = TRUE),  # Standard deviation
@@ -1332,14 +1422,14 @@ fish_with_activity_per_stage <- mhw_activity %>%
   arrange(Before_After)
 
 mhw_distance <- sum_heat_wave %>%
-  filter(!is.na(distance_shore_mean))
+  filter(!is.na(mean_disp_max))
 mhws_with_distance <-  mhw_distance %>% 
   distinct(Serial)
 fish_with_distance <- mhw_distance %>% 
   distinct(fish_id)
 fish_with_distance_per_stage <- mhw_distance %>% 
   group_by(Before_After) %>%
-  summarise(n_fish_with_depth = n_distinct(fish_id)) %>%
+  summarise(n_fish_with_distance = n_distinct(fish_id)) %>%
   arrange(Before_After)
 
 cat("----- MHW and Fish Data Summary -----\n\n")
@@ -1521,8 +1611,8 @@ dep_reg_plot <- ggplot(MHWs_comparison_lm, aes(x = intensity_cumulative, y = del
   theme_bw()+
   theme(panel.grid = element_blank(),
         axis.text = element_text(size = 20,color = "black"),
-        axis.title = element_text(size = 22),
-        )
+        axis.title.x = element_blank(),
+        axis.title = element_text(size = 22))
 
 # Filter out rows with NA depth
 sum_heat_wave_dep <- sum_heat_wave %>%
@@ -1565,26 +1655,135 @@ dep_symbol_compare_plot <- ggplot(sum_heat_wave_dep, aes(x = Before_After, y = m
   theme_bw() +
   theme(legend.position = "top",
         panel.grid = element_blank(),
+        axis.title.x = element_blank(),
         axis.text = element_text(size = 20,color = "black"),
         axis.title = element_text(size = 22))
 ggsave("Red Sea/Results/Plots/dep_symb_compare_plot_OISST_Fix.svg", dep_symbol_compare_plot, width = 12, height = 10)
 
+
+## Displacment
+
+
+# Only MHW:Before
+MHWs_comparison_lm <- MHWs_comparison %>% filter(window_factor==1.5 & Stage_period=="MHW : Before" )
+
+## Several stage period
+# MHWs_comparison_lm <- MHWs_comparison %>% filter(window_factor==1.5 & (Stage_period=="MHW : Before" | Stage_period=="After : MHW"))
+
+# Make sure factor levels are in correct order
+sum_heat_wave$Before_After <- factor(sum_heat_wave$Before_After,
+                                 levels = c("Before", "MHW", "After"))
+
+hist(MHWs_comparison_lm$log_max_displacement)
+lm_disp<- lm(log_max_displacement ~ intensity_cumulative,data = MHWs_comparison_lm)
+gratia::appraise(lm_disp)
+summary(lm_disp)
+
+# Make sure factor levels are in correct order
+MHWs_comparison_lm$Stage_period <- factor(MHWs_comparison_lm$Stage_period,
+                                 levels = c("MHW : Before", "After : Before", "After : MHW"))
+
+
+# Step 1: Summarize n per group
+# Summary stats for label positioning
+n_df_disp <- MHWs_comparison_lm %>%
+  select(-Period_of_day,-ln_activity_ratio,-delta_depth) %>% 
+  distinct() %>% 
+  group_by(intensity_cumulative) %>%
+  filter(!is.na(log_max_displacement)) %>% 
+  summarise(n = n(),
+            mean_ln = mean(log_max_displacement, na.rm = TRUE),
+            .groups = "drop") 
+
+disp_reg_plot <- ggplot(MHWs_comparison_lm, aes(x = intensity_cumulative, y = log_max_displacement)) +
+  stat_summary(fun = mean, geom = "point", size = 3, color = "black") +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width = 0.2, color = "black") +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred", linewidth = 1.4) +
+  stat_poly_eq(
+    aes(label = paste(..eq.label.., ..rr.label.., ..p.value.label.., sep = "~~~")),
+    formula = y ~ x,
+    parse = TRUE,
+    label.x = "center",
+    label.y = 0.9,
+    size = 4,
+    color = "black"
+  ) +
+  scale_x_continuous(breaks = seq(0, 30, by = 5)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  # geom_text(data = n_df_act, aes(x = intensity_cumulative, y=Inf , label = n),
+  #           inherit.aes = FALSE, size = 3, fontface = "bold",vjust=2) +
+  # facet_wrap(~ Stage_period) +
+  labs(
+    x= "Cumulative Intensity",
+    y = "ln(Displacment ratio)"
+  ) +
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        axis.title.x = element_text(size=22),
+        axis.text = element_text(size = 20,color = "black"),
+        axis.title = element_text(size = 22))
+
+
+# Filter out rows with NA displacment
+sum_heat_wave_disp <- sum_heat_wave %>%
+  filter(!is.na(mean_disp_max) & window_factor==1.5 ) %>% 
+  select(fish_id,Serial,Before_After,mean_disp_max,sd_disp_max,disp_max_days,species) %>% distinct()
+
+
+# Plot
+disp_symbol_compare_plot <- ggplot(sum_heat_wave_disp, aes(x = Before_After, y = mean_disp_max)) +
+  geom_boxplot(aes(fill = Before_After),alpha = 0.7,show.legend = FALSE) +
+  scale_fill_manual(values = c("Before" = "#2E8B57",
+                               "MHW" = "#DC143C",
+                               "After" = "#4169E1"))+
+  # facet_wrap(~species,scales="free_y")+
+  
+  # Add mean points and CI
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 18, # Diamond shape
+    size = 4,
+    color = "black"
+  ) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "errorbar",
+    width = 0.1,
+    color = "black",
+    linewidth = 0.8
+  ) +
+  labs(
+    x = "MHW Stage",
+    y = "Mean max daily displacment [m]"
+  ) +
+  theme_bw() +
+  theme(legend.position = "top",
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 20,color = "black"),
+        axis.title = element_text(size = 22))
+
+ggsave("Red Sea/Results/Plots/disp_symb_compare_plot_species_OISST_Fix.svg", disp_symbol_compare_plot, width = 12, height = 10)
+
 layout <- c(
   area(t = 1, l = 1, b = 1, r = 1),  # top-left (1/3 width)
   area(t = 1, l = 2, b = 1, r = 3),  # top-right (2/3 width)
-  area(t = 2, l = 1, b = 2, r = 1),  # bottom-left (1/3 width)
-  area(t = 2, l = 2, b = 2, r = 3)   # bottom-right (2/3 width)
+  area(t = 2, l = 1, b = 2, r = 1),  # middle-left (1/3 width)
+  area(t = 2, l = 2, b = 2, r = 3),  # middle-right (2/3 width)
+  area(t = 3, l = 1, b = 3, r = 1),  # bottom-left (1/3 width)
+  area(t = 3, l = 2, b = 3, r = 3)   # bottom-right (2/3 width)
 )
 
 # Combine with design layout
 full_plot <- act_symbol_compare_plot + act_reg_plot +
              dep_symbol_compare_plot + dep_reg_plot +
+             disp_symbol_compare_plot + disp_reg_plot +
              plot_layout(design = layout)
-
 
 full_plot
 
-ggsave("Red Sea/Results/Plots/act_dep_compare_plot_OISST_Fix.svg", full_plot, width = 12, height = 10)
+ggsave("Red Sea/Results/Plots/act_dep_disp_compare_plot_OISST_Fix.svg", full_plot, width = 12, height = 10)
+
 
 ```
 
